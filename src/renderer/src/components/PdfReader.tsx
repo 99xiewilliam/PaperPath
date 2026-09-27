@@ -6,6 +6,7 @@ import {
   Crop,
   Eye,
   EyeOff,
+  Frame,
   GripVertical,
   Hand,
   Highlighter,
@@ -97,6 +98,19 @@ interface PageSize {
 
 const MIN_SCALE = 0.5
 const MAX_SCALE = 3
+/**
+ * 触控板捏合灵敏度：`scale *= exp(-deltaY * PINCH_RATE)`。
+ *
+ * 捏合每帧的 deltaY 大约 1~10，0.015 对应「轻轻捏一下 5%~15%」—— 手势是连续的，
+ * 系数大了会一顿一顿，小了会觉得「捏半天不动」。
+ */
+const PINCH_RATE = 0.015
+/**
+ * 单次事件的缩放幅度上限（±25%）。
+ * 触控板每帧 deltaY 很小，这条不会碰到；但外接鼠标的 ⌘/Ctrl + 滚轮一格是 ±100，
+ * 不夹一下会从 128% 一步跳到 20%。
+ */
+const PINCH_STEP_CAP = 0.25
 /** 对话面板宽度（固定，位置收敛时需要它来算边界） */
 const CARD_WIDTH = 420
 /**
@@ -194,7 +208,13 @@ export function PdfReader({ paperId, highlights, onHighlightsChange, onInsertToN
   const pageBoxRefs = useRef(new Map<number, HTMLDivElement>())
   const fittedRef = useRef(false)
   /** 缩放前的视口锚点（哪一页 + 页内相对位置），缩放后原地接回去 */
-  const zoomAnchorRef = useRef<{ index: number; ratio: number } | null>(null)
+  const zoomAnchorRef = useRef<{
+    contentY: number
+    contentX: number
+    viewY: number
+    viewX: number
+    scale: number
+  } | null>(null)
   /** 阅读位置是否已恢复（恢复前禁止保存，免得打开时用顶部位置覆盖掉存档） */
   const restoredPosRef = useRef(false)
   const posSaveTimerRef = useRef<number | undefined>(undefined)
@@ -403,11 +423,28 @@ export function PdfReader({ paperId, highlights, onHighlightsChange, onInsertToN
     const anchor = zoomAnchorRef.current
     if (anchor) {
       zoomAnchorRef.current = null
-      const i = Math.min(anchor.index, offsets.length - 1)
-      el.scrollTop = CONT_PAD + offsets[i] + anchor.ratio * heights[i] - el.clientHeight * ANCHOR_RATIO
+      // 这次缩放的总倍率 —— 一次捏合的几十个事件会被 React 合并成一次渲染，
+      // 所以不能存单事件的倍率，要用「当前 scale / capture 时的 scale」
+      const factor = anchor.scale > 0 ? scale / anchor.scale : 1
+
+      /*
+       * 横向这里有个坑，踩了很久才定位到：设置 scrollLeft 的那一刻，容器的
+       * scrollWidth 可能还是**旧值** —— 新宽度是这一帧才写进 DOM 的，而滚动偏移
+       * 的钳制读的是布局结果，于是 94 这种值会被静默钳成 0。
+       * 表现就是「放大后横向永远贴左边、怎么拖都拖不动」，纵向却正常。
+       * 所以设完读回来验一次，没吃上就等下一帧布局落定再来一次。
+       */
+      const top = CONT_PAD + anchor.contentY * factor - anchor.viewY
+      const left = CONT_PAD + anchor.contentX * factor - anchor.viewX
+      const apply = (): void => {
+        el.scrollTop = top
+        el.scrollLeft = left
+      }
+      apply()
+      if (left > 1 && el.scrollLeft < 1) requestAnimationFrame(apply)
     }
     updateFromScroll()
-  }, [offsets, heights, updateFromScroll, savedPos])
+  }, [offsets, heights, scale, updateFromScroll, savedPos])
 
   /** 翻到某一页：设滚动位置 + 同步派生态（scroll 事件是异步的，连点按钮不能等它） */
   const scrollToPage = useCallback(
@@ -420,21 +457,52 @@ export function PdfReader({ paperId, highlights, onHighlightsChange, onInsertToN
     [offsets, updateFromScroll]
   )
 
-  /** 缩放前记下「视口锚线压在哪一页的什么位置」，缩放后原地接回，不跳页 */
-  const captureZoomAnchor = useCallback(() => {
-    const el = scrollRef.current
-    if (!el || !offsets.length) return
-    const index = clamp(page - 1, 0, offsets.length - 1)
-    const h = heights[index] || 1
-    const anchorCol = el.scrollTop - CONT_PAD + el.clientHeight * ANCHOR_RATIO
-    // 锚线可能落在页缝隙或页外（极端缩放中），收敛到页内附近即可
-    zoomAnchorRef.current = { index, ratio: clamp((anchorCol - offsets[index]) / h, -0.5, 1.5) }
-  }, [offsets, heights, page])
+  /**
+   * 缩放前记下「哪一点要钉在原地」，缩放后接回去，不跳页。
+   *
+   * 锚点按**内容坐标**记（而不是按页折算）：捏合一次会连发几十个事件、被 React
+   * 合并成一次渲染，按页折算要处理「heights 还是旧的」的中间态；内容坐标只要
+   * 恢复时乘上「当前 scale / capture 时的 scale」就好，横纵对称，也不怕合并。
+   *
+   * 视口位置：
+   *   - 不给（工具栏按钮）→ 纵向落在视口 40% 处、横向居中，视觉上最稳；
+   *   - 捏合 / ⌘+滚轮 → 传光标位置，「指哪儿放哪儿」—— 手指底下那一行不动。
+   */
+  const captureZoomAnchor = useCallback(
+    (anchorViewX?: number, anchorViewY?: number) => {
+      const el = scrollRef.current
+      if (!el) return
+      const viewY = clamp(anchorViewY ?? el.clientHeight * ANCHOR_RATIO, 0, el.clientHeight)
+      const viewX = clamp(anchorViewX ?? el.clientWidth / 2, 0, el.clientWidth)
+      zoomAnchorRef.current = {
+        contentY: el.scrollTop + viewY - CONT_PAD,
+        contentX: el.scrollLeft + viewX - CONT_PAD,
+        viewY,
+        viewX,
+        scale
+      }
+    },
+    [scale]
+  )
 
   const zoomBy = useCallback(
-    (delta: number) => {
-      captureZoomAnchor()
+    (delta: number, anchorViewX?: number, anchorViewY?: number) => {
+      captureZoomAnchor(anchorViewX, anchorViewY)
       setScale((s) => clamp(s + delta, MIN_SCALE, MAX_SCALE))
+    },
+    [captureZoomAnchor]
+  )
+
+  /**
+   * 按倍率缩放（工具栏按钮走加法，这里走乘法）。
+   *
+   * 捏合一次会连发几十上百个事件，用 `zoomBy(±0.15)` 那种加减法会一跳一跳；
+   * 乘法让「同样幅度的手势」在任何缩放级别下产生同样的视觉变化。
+   */
+  const zoomByFactor = useCallback(
+    (factor: number, anchorViewX?: number, anchorViewY?: number) => {
+      captureZoomAnchor(anchorViewX, anchorViewY)
+      setScale((s) => clamp(s * factor, MIN_SCALE, MAX_SCALE))
     },
     [captureZoomAnchor]
   )
@@ -450,12 +518,114 @@ export function PdfReader({ paperId, highlights, onHighlightsChange, onInsertToN
     setScale(clamp(available / base.width, MIN_SCALE, MAX_SCALE))
   }, [pageSizes, page, captureZoomAnchor])
 
+  /* ---------------- 整页（一屏一页） ---------------- */
+
+  /**
+   * 按高度适应：一屏正好放下一整页。
+   *
+   * 「适应宽度」在横向窗口里会让页面比视口高出一倍多，一屏只能看到半页 —— 双栏论文
+   * 尤其难受，滚到下半页时上半页讲了什么已经忘了。整页模式宁可字小一点，换「一眼
+   * 看完整页」：先看清结构、再看细节。
+   */
+  const fitPage = useCallback(() => {
+    const el = scrollRef.current
+    if (!el || !pageSizes?.length) return
+    const base = pageSizes[clamp(page - 1, 0, pageSizes.length - 1)]
+    // 上下各留 CONT_PAD，再多留一点给页缝，免得刚好顶到边
+    const available = el.clientHeight - CONT_PAD * 2 - 12
+    if (available <= 0) return
+    captureZoomAnchor()
+    setScale(clamp(available / base.height, MIN_SCALE, MAX_SCALE))
+  }, [pageSizes, page, captureZoomAnchor])
+
   // 文档加载完自动适应一次宽度，之后由用户手动缩放
   useEffect(() => {
     if (!pageSizes || fittedRef.current) return
     fittedRef.current = true
     fitWidth()
   }, [pageSizes, fitWidth])
+
+  /*
+   * 触控板捏合缩放（以及 ⌘ / Ctrl + 滚轮）。
+   *
+   * 为什么原来完全捏不动：这个视图的缩放一共只有三个入口 —— 工具栏的放大 / 缩小
+   * 按钮、适应宽度、整页 —— 而触控板捏合在 Chromium 里是**带 ctrlKey 的 wheel
+   * 事件**，页面上没有任何人监听它，手势于是凭空消失。
+   *
+   * 为什么必须用原生 addEventListener：React 把 wheel 委托在根节点上，并按规范
+   * 注册为 **passive**，`preventDefault()` 会失效（控制台报 "Unable to
+   * preventDefault inside passive event listener"）。而这里非阻止默认行为不可 ——
+   * 否则 Chromium 会顺手把**整个界面**做一次页面级缩放。
+   *
+   * 为什么绑在 window 而不是滚动容器上：捏合是**页面级手势**，Chromium 合成出来的
+   * wheel 事件不保证以光标下的元素为目标 —— 绑在容器上等冒泡，可能一个都收不到
+   * （表现和「没人监听」一模一样）。绑在 window 上、再用光标坐标判断「是不是落在
+   * 页面区里」，两种情况都能覆盖；用 capture 是为了不被中间某层的
+   * stopPropagation 截断。
+   *
+   * 监听只绑一次，靠 zoomRef 取最新的缩放函数：zoomByFactor 依赖排版量
+   * （offsets / heights / 当前页），跟着它重绑会在滚动时每帧解绑再绑定一次。
+   */
+  const zoomRef = useRef(zoomByFactor)
+  useEffect(() => {
+    zoomRef.current = zoomByFactor
+  }, [zoomByFactor])
+
+  /*
+   * 指针最后停在页面区的哪个纵向位置（相对容器顶边）。
+   *
+   * 为什么要单独记：macOS 把触控板捏合合成出来的 wheel 事件**不带光标坐标**
+   * （clientX / clientY 都是 0），只看事件坐标的话永远拿不到「用户想放大哪儿」，
+   * 只能一路回落到默认锚线 —— 表现就是「不管在哪儿捏，都往同一个地方放大」。
+   * 所以平时把指针位置记下来，捏合时用它当锚点。
+   */
+  const pointerYRef = useRef<number | null>(null)
+
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+    const onMove = (event: MouseEvent): void => {
+      pointerYRef.current = event.clientY - el.getBoundingClientRect().top
+    }
+    el.addEventListener('mousemove', onMove)
+    return () => el.removeEventListener('mousemove', onMove)
+  }, [])
+
+  useEffect(() => {
+    const onWheel = (event: WheelEvent): void => {
+      // 触控板捏合 = ctrlKey 的 wheel；⌘ + 双指滑动 / ⌘ + 滚轮同理。
+      if (!event.ctrlKey && !event.metaKey) return
+      const el = scrollRef.current
+      if (!el) return
+      const rect = el.getBoundingClientRect()
+      /*
+       * 事件带坐标时才校验落点（外接鼠标的 ⌘+滚轮一定带）。捏合事件坐标是 (0,0)，
+       * 这时不校验 —— 用户此刻就在看这份 PDF，捏合的意图没有歧义。
+       */
+      const hasPos = Boolean(event.clientX || event.clientY)
+      if (hasPos) {
+        const inside =
+          event.clientX >= rect.left &&
+          event.clientX <= rect.right &&
+          event.clientY >= rect.top &&
+          event.clientY <= rect.bottom
+        if (!inside) return
+      }
+      event.preventDefault()
+      const raw = Math.exp(-event.deltaY * PINCH_RATE)
+      /*
+       * 锚点用光标：捏合时是手势中心，⌘+滚轮时是指针位置。放大后「手指底下
+       * 那一行」仍停在原处，横纵都不会朝一个固定位置缩。
+       * 事件坐标是权威的（探针确认过：捏合也带 clientX/Y）；只有事件不带坐标
+       * 时才退回「指针最后停留的位置」—— 触控板捏合不移动光标，那条记录常是旧的。
+       */
+      const anchorViewY = hasPos ? event.clientY - rect.top : (pointerYRef.current ?? undefined)
+      const anchorViewX = hasPos ? event.clientX - rect.left : undefined
+      zoomRef.current(clamp(raw, 1 - PINCH_STEP_CAP, 1 + PINCH_STEP_CAP), anchorViewX, anchorViewY)
+    }
+    window.addEventListener('wheel', onWheel, { capture: true, passive: false })
+    return () => window.removeEventListener('wheel', onWheel, { capture: true })
+  }, [])
 
   /* ---------------- 每页渲染状态上报（PdfPageCanvas → 这里） ---------------- */
   const handleRenderStart = useCallback((pageNumber: number) => {
@@ -1112,8 +1282,14 @@ export function PdfReader({ paperId, highlights, onHighlightsChange, onInsertToN
   const myHighlights = highlights.filter((h) => !h.ai)
   const aiHighlights = highlights.filter((h) => h.ai)
 
+  /*
+   * 根节点上的 `min-w-0` 不能省：纵向 flex 里 item 的宽度默认不能小于内容的
+   * min-content，而 PDF 放大后单页比窗口宽得多 —— 缺了它，这一层会被页面顶开，
+   * 一路传导上去，最后滚动容器自己的 clientWidth 就等于内容宽度，横向彻底没得滚
+   * （表现：放大后右边一部分被裁掉、横向怎么拖都拖不动）。
+   */
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    <div className="absolute inset-0 flex min-h-0 flex-col">
       {/* 工具栏 */}
       <div className="mb-2 flex shrink-0 flex-wrap items-center gap-1.5">
         <div className="flex items-center gap-0.5 rounded-lg border border-line p-0.5">
@@ -1150,6 +1326,15 @@ export function PdfReader({ paperId, highlights, onHighlightsChange, onInsertToN
         >
           <Maximize2 className="h-3 w-3" />
           适应宽度
+        </button>
+
+        <button
+          title="按高度适应：一屏正好一整页，适合先通读结构"
+          onClick={fitPage}
+          className="flex items-center gap-1 rounded-lg border border-line px-2 py-1 text-[11px] text-ink-mid transition hover:border-strong hover:text-ink-high"
+        >
+          <Frame className="h-3 w-3" />
+          整页
         </button>
 
         <button
@@ -1324,7 +1509,13 @@ export function PdfReader({ paperId, highlights, onHighlightsChange, onInsertToN
         </div>
       ) : null}
 
-      <div className="flex min-h-0 flex-1 gap-2">
+      {/*
+        `w-full` + `min-w-0` 缺一不可：min-w-0 只解除「不能小于内容」的下限，
+        没有给出上限 —— 放大后的页面照样把这一层顶宽，再往下传给滚动容器，
+        于是容器 clientWidth 等于内容宽度，横向就没得滚了。w-full 把宽度钉死在
+        父容器上，内容再宽也只能溢出（由滚动容器自己消化）。
+      */}
+      <div className="flex min-h-0 w-full min-w-0 flex-1 gap-2">
         {/*
           页面区。
           `min-w-0` 不能省：flex-1 只管长，而 `min-width: auto` 会让它**不能小于

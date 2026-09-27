@@ -84,6 +84,21 @@ function createWindow(): void {
 
   mainWindow.on('ready-to-show', () => mainWindow?.show())
 
+  /*
+   * 打开「视觉缩放」，否则触控板捏合在 Chromium 那一层就被丢掉了。
+   *
+   * Electron 默认把 visual zoom 关着（等价于限制在 1）：此时 macOS 的捏合手势
+   * 既不会缩放页面，**也不会派发 wheel 事件到渲染层** —— 所以「渲染层自己监听
+   * 捏合并翻译成 PDF 缩放」这条路是走不通的，监听写得再对也收不到东西。
+   * 官方文档原话：Visual zoom is disabled by default in Electron.
+   *
+   * 开到 (1,3) 之后，捏合才会以「带 ctrlKey 的 wheel 事件」交到页面手里
+   * （VS Code 也是靠这个行为做编辑器缩放的）。
+   * 而 Chromium 默认的页面级缩放（整个界面跟着一起变大）由渲染层的
+   * useZoomGuard 统一拦掉，手势最终只服务于 PDF 内容的缩放。
+   */
+  mainWindow.webContents.setVisualZoomLevelLimits(1, 3)
+
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:\/\//i.test(url)) shell.openExternal(url)
     return { action: 'deny' }

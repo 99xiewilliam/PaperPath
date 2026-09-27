@@ -256,3 +256,15 @@
 .md-body input[type='checkbox'] {
   @apply mr-1.5 align-middle;
 }
+
+/*
+ * 看 PDF 时的「收起论文信息」态（class 由 PaperDetail 按「原文 + PDF 原版面」加在
+ * header 上）：隐藏页眉里除 tabs 之外的直接子元素，把纵向空间让给正文。
+ *
+ * tabs 必须留着 —— 它压着页眉的 hairline 画激活下划线（见 PaperDetail 里的说明），
+ * 移出去就不成样子了。用选择器而不是逐个加条件类，是因为要藏的是「除 tabs 之外的
+ * 全部」，逐个标注的话，以后往页眉里加任何东西都会忘了标。
+ */
+.pdf-focus > :not(.pdf-focus-keep) {
+  display: none;
+}

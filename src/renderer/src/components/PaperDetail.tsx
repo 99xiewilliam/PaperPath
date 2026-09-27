@@ -194,6 +194,15 @@ export function PaperDetail(): JSX.Element {
   const papers = useAppStore((s) => s.papers)
   const [draft, setDraft] = useState<Draft | null>(null)
   const [tab, setTab] = useState<Tab>('notes')
+  /**
+   * 看 PDF 时收起页眉那堆论文信息（标题 / 分类 / 标签 / 关联论文），把纵向空间让给正文。
+   *
+   * 横向窗口里「适应宽度」会让页面比视口高出一倍多，页眉再压掉三百来像素的话，
+   * 一屏就只剩半页了。只在「原文 + PDF 原版面」时生效（class 加在 header 上，
+   * 见下方 CSS 里的 .pdf-focus），其它 tab 完全不受影响；想顺手改个分类、打分，
+   * 点 tabs 右侧那个按钮展开即可。
+   */
+  const [pdfFocus, setPdfFocus] = useState(true)
   const [saveState, setSaveState] = useState<'idle' | 'pending' | 'saved' | 'error'>('idle')
   const [summarizing, setSummarizing] = useState(false)
   const [rewriting, setRewriting] = useState<string | null>(null)
@@ -560,7 +569,13 @@ export function PaperDetail(): JSX.Element {
   return (
     <main className="flex h-full min-w-0 flex-1 flex-col bg-bg-base">
       {/* 头部 */}
-      <header className="shrink-0 border-b border-line px-5 pb-3 pt-4">
+      <header
+        className={cn(
+          'shrink-0 border-b border-line px-5 pb-3 pt-4',
+          // 收起态：页眉只留 tabs（.pdf-focus-keep），其余直接子元素在 CSS 里隐藏
+          showPdfViewer && pdfFocus && 'pdf-focus'
+        )}
+      >
         <div className="flex items-start gap-3">
           <div className="min-w-0 flex-1">
             {/*
@@ -773,7 +788,7 @@ export function PaperDetail(): JSX.Element {
          * Tabs 用期刊式「ruling」下划线：激活项压一条松绿短线在页眉的
          * hairline 上（纸页的天头地脚就是这么排的），而不是整块底色药丸。
          */}
-        <div className="mt-3 flex flex-wrap items-center gap-0.5">
+        <div className="pdf-focus-keep mt-3 flex flex-wrap items-center gap-0.5">
           {(
             [
               ['notes', '结构化笔记', BookOpen],
@@ -815,13 +830,23 @@ export function PaperDetail(): JSX.Element {
               <button className="text-warn underline" onClick={() => void flush()}>保存失败，点击重试</button>
             ) : null}
           </span>
+          {/* 只在看 PDF 时出现：展开 / 收起页眉里那堆论文信息 */}
+          {showPdfViewer ? (
+            <button
+              onClick={() => setPdfFocus((v) => !v)}
+              className="ml-2 shrink-0 rounded-lg border border-line px-2 py-0.5 text-[10.5px] text-ink-low transition hover:border-strong hover:text-ink-mid"
+            >
+              {pdfFocus ? '显示论文信息' : '收起论文信息'}
+            </button>
+          ) : null}
         </div>
       </header>
 
       {/* 内容 */}
       <div
         className={cn(
-          'min-h-0 flex-1 px-5 py-4',
+          // min-w-0：同上，横向也得允许被压缩，否则放大后的页面会把整页顶宽
+          'min-h-0 min-w-0 flex-1 px-5 py-4',
           // 内嵌 PDF 时把滚动交给 PDF 阅读器自己，外层滚动会跟它抢滚轮事件
           showPdfViewer ? 'overflow-hidden' : 'overflow-y-auto'
         )}
@@ -940,7 +965,8 @@ export function PaperDetail(): JSX.Element {
             ) : null}
 
             {showPdfViewer ? (
-              <div className="min-h-0 flex-1">
+              // relative：给 PdfReader 的 absolute inset-0 当包含块（见那边对 min-w-0 的说明）
+              <div className="relative min-h-0 min-w-0 flex-1">
                 <PdfReader
                   paperId={meta.id}
                   highlights={meta.highlights ?? []}

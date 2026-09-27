@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
-import { Bot, Loader2, Send, Trash2 } from 'lucide-react'
+import { Bot, Copy, History, Loader2, Plus, Send, Trash2 } from 'lucide-react'
 import type { ChatMessage } from '@shared/types'
-import { cn, errorMessage } from '@/lib/utils'
+import { cn, errorMessage, formatDate } from '@/lib/utils'
 import { useAppStore } from '@/store/useAppStore'
-import { chatThreadKey, useChatStore, type ChatBubble } from '@/store/chatStore'
+import { chatThreadKey, useChatStore, type ChatBubble, type ChatSession } from '@/store/chatStore'
 import { Markdown } from './Markdown'
 import { IconButton } from './ui'
 
@@ -22,6 +22,9 @@ const PRESETS = [
  */
 const EMPTY_THREAD: ChatBubble[] = []
 
+/** 同上，给「一组论文下的对话列表」用的稳定空数组 */
+const EMPTY_SESSIONS: ChatSession[] = []
+
 export function ChatPanel({
   paperIds,
   emptyHint
@@ -37,11 +40,23 @@ export function ChatPanel({
    * 会话也就跟着一起没了（多轮本身一直是支持的，丢的只是留存）。
    */
   const threadKey = chatThreadKey(paperIds)
-  const messages = useChatStore((s) => s.threads[threadKey] ?? EMPTY_THREAD)
+  const sessions = useChatStore((s) => s.threads[threadKey] ?? EMPTY_SESSIONS)
+  const activeId = useChatStore((s) => s.active[threadKey])
   const append = useChatStore((s) => s.append)
-  const clearThread = useChatStore((s) => s.clear)
+  const startSession = useChatStore((s) => s.newSession)
+  const selectSession = useChatStore((s) => s.selectSession)
+  const removeSession = useChatStore((s) => s.removeSession)
+
+  /*
+   * 当前这条对话：选中的那条，没有就落到列表第一条（新开的排在最前）。
+   * 一条都没有时 `session` 为 null —— 此时提问会由 store 顺手开一条。
+   */
+  const session = sessions.find((s) => s.id === activeId) ?? sessions[0] ?? null
+  const messages = session?.messages ?? EMPTY_THREAD
+
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
+  const [historyOpen, setHistoryOpen] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -49,6 +64,16 @@ export function ChatPanel({
   }, [messages, loading])
 
   const titles = papers.filter((p) => paperIds.includes(p.id)).map((p) => p.title)
+
+  /** 复制一条回答的 Markdown 原文（和 PDF 面板里那个复制是同一套做法） */
+  const copyMessage = async (text: string): Promise<void> => {
+    try {
+      await navigator.clipboard.writeText(text)
+      useAppStore.getState().toast('已复制到剪贴板', 'success')
+    } catch (err) {
+      useAppStore.getState().toast(`复制失败：${errorMessage(err)}`, 'error')
+    }
+  }
 
   const send = async (text: string): Promise<void> => {
     const content = text.trim()
@@ -99,11 +124,72 @@ export function ChatPanel({
             emptyHint ?? '选择论文后可以向 AI 提问。回答只基于你的笔记，不会凭空编造。'
           )}
         </div>
-        {messages.length ? (
-          <IconButton title="清空对话" onClick={() => clearThread(threadKey)}>
-            <Trash2 className="h-3.5 w-3.5" />
+        <div className="flex shrink-0 items-center gap-0.5">
+          {session && session.messages.length ? (
+            <IconButton title="删除这条对话" onClick={() => removeSession(threadKey, session.id)}>
+              <Trash2 className="h-3.5 w-3.5" />
+            </IconButton>
+          ) : null}
+          {sessions.length > 1 ? (
+            <div className="relative">
+              <IconButton
+                title={`历史对话（这组论文下共 ${sessions.length} 条）`}
+                onClick={() => setHistoryOpen((v) => !v)}
+              >
+                <History className="h-3.5 w-3.5" />
+              </IconButton>
+              {historyOpen ? (
+                <>
+                  {/* 点空白处收起 */}
+                  <div className="fixed inset-0 z-30" onClick={() => setHistoryOpen(false)} />
+                  <div className="absolute right-0 top-7 z-40 max-h-72 w-64 overflow-y-auto rounded-xl border border-line bg-bg-raised p-1 shadow-xl">
+                    {/*
+                      列表按「新 → 旧」显示（store 里就是这样存的），当前那条高亮。
+                      标题取首个提问 —— 记不住标题的对话，翻历史时等于没有历史。
+                    */}
+                    {sessions.map((s) => (
+                      <div
+                        key={s.id}
+                        className={cn(
+                          'group flex items-center gap-1 rounded-lg px-1.5 py-1 transition',
+                          s.id === session?.id ? 'bg-brand/15' : 'hover:bg-white/[0.05]'
+                        )}
+                      >
+                        <button
+                          onClick={() => {
+                            selectSession(threadKey, s.id)
+                            setHistoryOpen(false)
+                          }}
+                          className="min-w-0 flex-1 text-left"
+                        >
+                          <span className="block truncate text-[11.5px] text-ink-mid">
+                            {s.title || '（还没提问）'}
+                          </span>
+                          <span className="block text-[10px] text-ink-low">
+                            {s.messages.length} 条 · {formatDate(new Date(s.updatedAt).toISOString())}
+                          </span>
+                        </button>
+                        <button
+                          title="删除这条对话"
+                          onClick={() => removeSession(threadKey, s.id)}
+                          className="shrink-0 rounded p-1 text-ink-low opacity-0 transition hover:text-warn group-hover:opacity-100"
+                        >
+                          <Trash2 className="h-3 w-3" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              ) : null}
+            </div>
+          ) : null}
+          <IconButton
+            title="新开一条对话（当前这条会留在历史里，随时能翻回来）"
+            onClick={() => startSession(threadKey)}
+          >
+            <Plus className="h-3.5 w-3.5" />
           </IconButton>
-        ) : null}
+        </div>
       </div>
 
       <div ref={scrollRef} className="min-h-[280px] flex-1 space-y-3 overflow-y-auto pr-1">
@@ -123,7 +209,7 @@ export function ChatPanel({
           messages.map((m) => (
             <div
               key={m.id}
-              className={cn('flex', m.role === 'user' ? 'justify-end' : 'justify-start')}
+              className={cn('flex flex-col', m.role === 'user' ? 'items-end' : 'items-start')}
             >
               <div
                 className={cn(
@@ -139,6 +225,19 @@ export function ChatPanel({
                   <span className="whitespace-pre-wrap">{m.content}</span>
                 )}
               </div>
+              {/*
+                复制按钮**常显**，不做成悬停才出现 —— 它是这个面板上最常用的动作之一，
+                藏起来就等于没有（找不着按钮的人不会去猜「是不是要悬停一下」）。
+                复制的是 Markdown 原文，粘进笔记里标题、列表、代码块都还在。
+              */}
+              <button
+                title="复制这段文本（Markdown 原文）"
+                onClick={() => void copyMessage(m.content)}
+                className="mt-1 flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10.5px] text-ink-low transition hover:bg-white/[0.06] hover:text-ink-high"
+              >
+                <Copy className="h-3 w-3" />
+                复制
+              </button>
             </div>
           ))
         )}

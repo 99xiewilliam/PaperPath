@@ -3,6 +3,7 @@ import { Loader2 } from 'lucide-react'
 import { useAppStore } from '@/store/useAppStore'
 import { useUiStore } from '@/store/useUiStore'
 import { useHotkeys } from '@/lib/useHotkeys'
+import { useZoomGuard } from '@/lib/useZoomGuard'
 import { Sidebar } from '@/components/Sidebar'
 import { PaperList } from '@/components/PaperList'
 import { PaperDetail } from '@/components/PaperDetail'
@@ -44,6 +45,8 @@ export default function App(): JSX.Element {
   const isMac = window.papervault.app.platform === 'darwin'
 
   useHotkeys()
+  // 主进程为了触控板捏合打开了 visual zoom，这里负责把「整个界面跟着缩放」的那半边拦住
+  useZoomGuard()
 
   useEffect(() => {
     void init()
