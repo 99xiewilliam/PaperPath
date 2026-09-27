@@ -1,0 +1,96 @@
+{
+  "name": "papervault",
+  "productName": "PaperVault",
+  "version": "0.1.0",
+  "private": true,
+  "description": "PaperVault - 本地优先的论文阅读知识库：沉淀写作套路与实验方法论",
+  "author": "PaperVault",
+  "main": "./out/main/index.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "electron-vite dev -w",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "typecheck": "tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.web.json --noEmit && tsc -p tsconfig.scripts.json --noEmit",
+    "verify": "npm run typecheck && npm run build && npm run smoke:db && npm run smoke:graph && npm run smoke:search && npm run smoke:parse && npm run smoke:sections && npm run smoke:stream && npm run smoke:tasks && npm run smoke:ipc && npm run smoke:menu && npm run smoke:pagination && npm run smoke:learning",
+    "inspect:pdf": "esbuild src/renderer/src/lib/pdfText.ts --bundle --platform=node --format=cjs --outfile=.pv-inspect/pdfText.cjs --log-level=warning && esbuild src/main/papertext.ts --bundle --platform=node --format=cjs --outfile=.pv-inspect/papertext.cjs --log-level=warning && node scripts/inspect-pdf.cjs",
+    "smoke:ai": "esbuild scripts/smoke-ai.ts --bundle --platform=node --format=cjs --outfile=.pv-inspect/smoke-ai.cjs --alias:@shared=./src/shared --external:electron --external:pdfjs-dist --log-level=warning && node .pv-inspect/smoke-ai.cjs",
+    "smoke:graph": "esbuild scripts/smoke-graph.ts --bundle --platform=node --format=cjs --outfile=.pv-inspect/smoke-graph.cjs --alias:@shared=./src/shared --external:electron --external:sql.js --log-level=warning && node .pv-inspect/smoke-graph.cjs",
+    "smoke:db": "esbuild scripts/smoke-db.ts --bundle --platform=node --format=cjs --outfile=.pv-inspect/smoke-db.cjs --alias:@shared=./src/shared --external:electron --external:sql.js --log-level=warning && node .pv-inspect/smoke-db.cjs",
+    "smoke:tasks": "esbuild scripts/smoke-tasks.ts --bundle --platform=node --format=cjs --outfile=.pv-inspect/smoke-tasks.cjs --alias:@shared=./src/shared --external:electron --external:sql.js --log-level=warning && node .pv-inspect/smoke-tasks.cjs",
+    "smoke:ipc": "esbuild scripts/smoke-ipc.ts --bundle --platform=node --format=cjs --outfile=.pv-inspect/smoke-ipc.cjs --alias:@shared=./src/shared --alias:electron=./scripts/stubs/electron.ts --external:sql.js --log-level=warning && node .pv-inspect/smoke-ipc.cjs",
+    "smoke:menu": "esbuild scripts/smoke-menu.ts --bundle --platform=node --format=cjs --outfile=.pv-inspect/smoke-menu.cjs --alias:@shared=./src/shared --alias:electron=./scripts/stubs/electron.ts --log-level=warning && node .pv-inspect/smoke-menu.cjs",
+    "smoke:pagination": "esbuild scripts/smoke-pagination.ts --bundle --platform=node --format=cjs --outfile=.pv-inspect/smoke-pagination.cjs --alias:@shared=./src/shared --log-level=warning && node .pv-inspect/smoke-pagination.cjs",
+    "smoke:sections": "esbuild scripts/smoke-sections.ts --bundle --platform=node --format=cjs --outfile=.pv-inspect/smoke-sections.cjs --alias:@shared=./src/shared --external:electron --external:pdfjs-dist --log-level=warning && node .pv-inspect/smoke-sections.cjs",
+    "smoke:search": "esbuild scripts/smoke-search.ts --bundle --platform=node --format=cjs --outfile=.pv-inspect/smoke-search.cjs --alias:@shared=./src/shared --external:electron --external:sql.js --log-level=warning && node .pv-inspect/smoke-search.cjs",
+    "smoke:parse": "esbuild scripts/smoke-parse.ts --bundle --platform=node --format=cjs --outfile=.pv-inspect/smoke-parse.cjs --alias:@shared=./src/shared --external:electron --log-level=warning && node .pv-inspect/smoke-parse.cjs",
+    "smoke:stream": "esbuild scripts/smoke-stream.ts --bundle --platform=node --format=cjs --outfile=.pv-inspect/smoke-stream.cjs --alias:@shared=./src/shared --external:electron --log-level=warning && node .pv-inspect/smoke-stream.cjs",
+    "bench:search": "esbuild scripts/bench-search.ts --bundle --platform=node --format=cjs --outfile=.pv-inspect/bench-search.cjs --alias:@shared=./src/shared --external:sql.js --log-level=warning && node .pv-inspect/bench-search.cjs",
+    "icon:build": "esbuild scripts/make-icon.ts --bundle --platform=node --format=cjs --outfile=.pv-inspect/make-icon.cjs --external:electron --log-level=warning && node .pv-inspect/make-icon.cjs",
+    "dist:mac": "npm run icon:build && npm run build && electron-builder --mac",
+    "dist:win": "npm run icon:build && npm run build && electron-builder --win",
+    "smoke:learning": "esbuild scripts/smoke-learning.ts --bundle --platform=node --format=cjs --outfile=.pv-inspect/smoke-learning.cjs --alias:@shared=./src/shared --alias:electron=./scripts/stubs/electron.ts --external:sql.js --log-level=warning && node .pv-inspect/smoke-learning.cjs"
+  },
+  "build": {
+    "appId": "com.papervault.app",
+    "productName": "PaperVault",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "out/**",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "**/node_modules/sql.js/**"
+    ],
+    "mac": {
+      "category": "public.app-category.productivity",
+      "target": [
+        "dmg"
+      ],
+      "hardenedRuntime": true,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "notarize": true
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    }
+  },
+  "dependencies": {
+    "gray-matter": "^4.0.3",
+    "sql.js": "^1.12.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.1",
+    "@types/react": "^18.3.14",
+    "@types/react-dom": "^18.3.2",
+    "@types/sql.js": "^1.4.9",
+    "@vitejs/plugin-react": "^4.3.4",
+    "autoprefixer": "^10.4.20",
+    "clsx": "^2.1.1",
+    "electron": "^33.2.0",
+    "electron-builder": "^24.13.3",
+    "electron-vite": "^2.3.0",
+    "esbuild": "^0.21.5",
+    "lucide-react": "^0.454.0",
+    "pdfjs-dist": "^4.10.38",
+    "postcss": "^8.5.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-markdown": "^9.0.1",
+    "remark-gfm": "^4.0.0",
+    "tailwind-merge": "^2.5.5",
+    "tailwindcss": "3.4.17",
+    "tailwindcss-animate": "^1.0.7",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.11",
+    "zustand": "^4.5.5"
+  }
+}

@@ -1,0 +1,115 @@
+/*
+ * PDF 文字层样式。
+ *
+ * 规则照搬 pdfjs-dist/web/pdf_viewer.css 里 .textLayer 那一段 —— 文字层靠绝对
+ * 定位的透明 span 覆盖在 canvas 上，任何一条规则改动都可能导致选区偏移，
+ * 所以不要「优化」它们。
+ *
+ * 之所以不直接 @import 整个 pdf_viewer.css：那有 100KB，绝大部分是 viewer 自带
+ * 的工具栏 / 侧栏样式，我们一个都用不上。
+ */
+
+.pdf-viewer-page .textLayer {
+  position: absolute;
+  text-align: initial;
+  inset: 0;
+  overflow: clip;
+  opacity: 1;
+  line-height: 1;
+  -webkit-text-size-adjust: none;
+  text-size-adjust: none;
+  forced-color-adjust: none;
+  transform-origin: 0 0;
+  caret-color: CanvasText;
+  z-index: 0;
+  /*
+   * 必须显式打开：应用为了「像原生」在 body 上设了 user-select: none，
+   * 而 user-select 是继承属性 —— 不覆盖的话文字层这些 span 全部选不动。
+   */
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.pdf-viewer-page .textLayer :is(span, br) {
+  color: transparent;
+  position: absolute;
+  white-space: pre;
+  cursor: text;
+  transform-origin: 0% 0%;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.pdf-viewer-page .textLayer > :not(.markedContent),
+.pdf-viewer-page .textLayer .markedContent span:not(.markedContent) {
+  z-index: 1;
+}
+
+.pdf-viewer-page .textLayer span.markedContent {
+  top: 0;
+  height: 0;
+}
+
+.pdf-viewer-page .textLayer span[role='img'] {
+  user-select: none;
+  cursor: default;
+}
+
+/* 选中高亮用品牌色，和笔记里的选区保持一致的观感 */
+.pdf-viewer-page .textLayer ::selection {
+  background: rgba(116, 172, 143, 0.42);
+}
+
+.pdf-viewer-page .textLayer br::selection {
+  background: transparent;
+}
+
+.pdf-viewer-page .textLayer .endOfContent {
+  display: block;
+  position: absolute;
+  inset: 100% 0 0;
+  z-index: 0;
+  cursor: default;
+  user-select: none;
+}
+
+.pdf-viewer-page .textLayer.selecting .endOfContent {
+  top: 0;
+}
+
+/*
+ * 浮层卡片（划词工具栏 / 结果框）。
+ *
+ * 刻意用实色而不是 Tailwind 的半透明叠加：这类面板压在白色 PDF 上，
+ * 一旦背景色没真正生效，再叠上 backdrop-blur 就会糊成一片惨白，
+ * 文字完全看不清。实色最稳。
+ */
+.pdf-float-card {
+  background: rgba(31, 19, 30, 0.985);
+  /* 显式给个前景色，不依赖从 body 继承 —— 卡片压在白纸上，继承链容易出意外 */
+  color: #ece8df;
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.6);
+}
+
+/*
+ * PDF 深色模式。
+ *
+ * 反相 + 色相旋转 180° 是 PDF 阅读器的通行做法：纯 invert 会把彩色图片
+ * 变成负片，叠加色相旋转能把色相大致掰回来。图片仍会不自然（这是取舍），
+ * 但白纸黑字的阅读体验是对的。
+ *
+ * 只作用于 canvas 和高亮层两个元素，不作用于外层容器 —— 否则浮层卡片
+ * 和工具栏也会被一起反相，那就成了深色底上的浅色字，反过来了。
+ */
+.pdf-invert {
+  filter: invert(1) hue-rotate(180deg);
+}
+
+/* 深色模式下选区的品牌色本身没问题，但要更实一点才在暗底上看清 */
+.pdf-viewer-page.is-dark .textLayer ::selection {
+  background: rgba(116, 172, 143, 0.50);
+}
+

@@ -1,0 +1,258 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    -webkit-font-smoothing: antialiased;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-bg-base text-ink-high font-sans text-[13.5px] leading-[1.65];
+    overflow: hidden;
+    user-select: none;
+  }
+
+  input,
+  textarea,
+  [contenteditable='true'] {
+    user-select: text;
+  }
+
+  /* 选区用松绿：像荧光笔划过纸面，而不是终端里的反白 */
+  ::selection {
+    background: rgba(116, 172, 143, 0.32);
+  }
+
+  /*
+   * 滚动条收细到 7px：暗色工作台里粗滚动条是一条显眼的「灰杠」，
+   * 细一档整体观感立刻沉下来。thumb 更透一点，hover 才抬起来。
+   */
+  ::-webkit-scrollbar {
+    width: 7px;
+    height: 7px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.08);
+    border-radius: 999px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.16);
+    background-clip: content-box;
+  }
+
+  input[type='range'] {
+    @apply h-1 w-full cursor-pointer appearance-none rounded-full bg-white/10;
+  }
+
+  input[type='range']::-webkit-slider-thumb {
+    @apply h-3 w-3 appearance-none rounded-full bg-brand-soft;
+    box-shadow: 0 0 0 3px rgba(116, 172, 143, 0.18);
+  }
+
+  /*
+   * 统一 <select> 的观感：macOS 的原生箭头是系统蓝，和界面无关；
+   * 换成自绘的象牙色小箭头（data URI 内联，CSP 的 img-src 允许 data:）。
+   * 不动各处自己的 px-* 内边距——箭头贴右 4px 摆，视觉上不挤字。
+   */
+  select {
+    @apply cursor-pointer appearance-none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6' fill='none'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23ABA69B' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 4px center;
+  }
+
+  select option {
+    @apply bg-bg-overlay text-ink-high;
+  }
+
+  /*
+   * 键盘焦点环：Tab 导航时给松绿描边（焦点去向肉眼可见），
+   * 鼠标点击不触发 :focus-visible，不会干扰平时的观感。
+   * 输入类控件已有自己的 ring / border 样式，这里排除以免叠两层。
+   */
+  :focus-visible {
+    outline: 2px solid rgba(116, 172, 143, 0.55);
+    outline-offset: 1px;
+  }
+
+  input:focus-visible,
+  textarea:focus-visible,
+  select:focus-visible,
+  [contenteditable='true']:focus-visible {
+    outline: none;
+  }
+}
+
+@layer utilities {
+  .app-drag {
+    -webkit-app-region: drag;
+  }
+
+  .app-no-drag {
+    -webkit-app-region: no-drag;
+  }
+
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+
+  /*
+   * 拖拽调宽（Resizer）期间挂在 body 上：光标必须整个窗口都是 col-resize
+   * （拖到按钮上方时光标闪回 pointer 会显得「松手了」），并且禁止划选文本。
+   * `*` 加 !important 是必要的——子元素自己的 cursor 一律压不过它。
+   */
+  .panel-resizing,
+  .panel-resizing * {
+    cursor: col-resize !important;
+    user-select: none !important;
+  }
+}
+
+/*
+ * 组件级抽象放 components 层，不能放 utilities 层。
+ *
+ * 放在 utilities 层会跟 Tailwind 生成的工具类同层，于是「同层内后写的赢」——
+ * 而 .field 恰好被排在这些工具类之后，导致 <input class="field pl-8"> 里的
+ * pl-8 被 .field 自己的 px-3 覆盖掉（实测 .pl-8 在 33834、.field 在 41014），
+ * 搜索框放大镜图标就是这么跟文字糊在一起的。
+ *
+ * components 层在 utilities 层之前输出，工具类才能正常覆盖这些默认值。
+ */
+@layer components {
+  /*
+   * 卡片的层次感来自「顶部一像素内高光 + hairline 边框」，而不是大圆角大色差 ——
+   * 那是深色工作台（Linear / Arc 一类）的分层方式，也顺便把圆角收到 8px。
+   */
+  .card {
+    @apply rounded-lg border border-line bg-bg-raised;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.035);
+  }
+
+  .field {
+    @apply w-full rounded-lg border border-line bg-bg-base px-3 py-2 text-[13px] text-ink-high
+      outline-none transition placeholder:text-ink-low focus:border-brand/60 focus:ring-2 focus:ring-brand/20;
+  }
+
+  /*
+   * chip 从「满圆药丸」改成 5px 小圆角的标签形：圆药丸 + 彩色底是「少儿感」的
+   * 重灾区（满屏彩色糖果豆），小圆角标签读起来是 GitHub label 一类的工具感。
+   * 内边距同步收紧一档，让密集的分类 / 标签区不再鼓胀。
+   */
+  .chip {
+    @apply inline-flex items-center gap-1 rounded-[5px] border border-line px-1.5 py-[2px]
+      text-[11px] font-medium leading-none;
+  }
+}
+
+/*
+ * Markdown 渲染样式 --------------------------------------------------
+ *
+ * 阅读面是「论文的内容」，和 UI 骨架（无衬线）分开：正文用衬线、放大半号、
+ * 行距放宽——宋体 + 14px 正是中文论文排版的惯例观感。代码与行内标记保持
+ * 等宽，和正文形成「手稿 vs 打字机」的对照。
+ */
+.md-body {
+  @apply font-serif text-[14px] leading-[1.85] text-ink-high;
+}
+
+.md-body h1,
+.md-body h2,
+.md-body h3,
+.md-body h4 {
+  @apply mt-5 mb-2 font-semibold text-ink-high;
+}
+
+.md-body h1 {
+  @apply text-[19px];
+}
+.md-body h2 {
+  @apply text-[16px] border-b border-line pb-1.5;
+}
+.md-body h3 {
+  @apply text-[14.5px];
+}
+.md-body h4 {
+  @apply text-[13.5px] text-ink-mid;
+}
+
+.md-body p {
+  @apply my-2;
+}
+
+.md-body ul {
+  @apply my-2 list-disc space-y-1 pl-5;
+}
+
+.md-body ol {
+  @apply my-2 list-decimal space-y-1 pl-5;
+}
+
+.md-body li > ul,
+.md-body li > ol {
+  @apply my-1;
+}
+
+.md-body a {
+  @apply text-brand-mist underline decoration-brand/40 hover:decoration-brand;
+}
+
+/* 原文图表：限宽 + 描边，否则大图会把版面撑破 */
+.md-body img {
+  @apply my-2 max-w-full rounded-lg border border-line bg-white/[0.03];
+}
+
+.md-body strong {
+  @apply font-semibold text-white;
+}
+
+.md-body code {
+  @apply rounded bg-white/[0.07] px-1.5 py-0.5 font-mono text-[12px] text-accent-soft;
+}
+
+.md-body pre {
+  @apply my-3 overflow-x-auto rounded-lg border border-line bg-black/40 p-3;
+}
+
+.md-body pre code {
+  @apply bg-transparent p-0 text-[12px] text-ink-high;
+}
+
+.md-body blockquote {
+  @apply my-3 border-l-2 border-brand/50 bg-brand/[0.06] py-1.5 pl-3 text-ink-mid;
+}
+
+.md-body table {
+  @apply my-3 w-full border-collapse overflow-hidden rounded-lg text-[12.5px];
+}
+
+.md-body th,
+.md-body td {
+  @apply border border-line px-2.5 py-1.5 text-left align-top;
+}
+
+.md-body th {
+  @apply bg-white/[0.04] font-semibold;
+}
+
+.md-body hr {
+  @apply my-5 border-line;
+}
+
+.md-body input[type='checkbox'] {
+  @apply mr-1.5 align-middle;
+}

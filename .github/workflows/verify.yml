@@ -1,0 +1,29 @@
+name: verify
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# 只跑「不需要密钥、不需要图形界面」的那部分：
+#   typecheck（主进程 / 渲染层 / scripts）+ build + 全部 smoke 套件
+# smoke:ai 需要真实 API Key 与 PDF，因此不在 CI 里（见 README）。
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - run: npm ci
+
+      # 说明 1：这里刻意只跑 verify。`npm run lint` 需要先装 eslint / prettier，
+      # 属于待办（见 README 的「工程约定」一节），装好后再把它加回来即可。
+      # 说明 2：`npm ci` 要求 package.json 与 lockfile 一致。改了依赖（含 engines）
+      # 之后必须跑 `npm install --package-lock-only`，否则这一步会直接失败。
+      - run: npm run verify

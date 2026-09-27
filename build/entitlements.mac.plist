@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  这份文件替换了 @electron/osx-sign 自带的默认值（entitlements/default.darwin.plist）。
+	  那套默认值是按「App Sandbox 应用」写的：com.apple.security.device.camera /
+	  audio-input / bluetooth / usb / print 以及 personal-information.location。
+	  本应用不上沙箱，这些 device.* 权限不产生任何实际授权，只是审计时的噪音；
+	  而它们同时又漏掉了 Electron 真正需要的 allow-unsigned-executable-memory 与
+	  allow-dyld-environment-variables。所以这里显式写一份最小且正确的集合。
+	-->
+	<!--
+	  Hardened Runtime 下，V8 必须显式申请 JIT 权限。
+	  Electron 的主进程、渲染进程、utility 进程都跑在 V8 上，所以这份
+	  entitlements 同时用于 app 本体与 helper（见 package.json 里的
+	  entitlements / entitlementsInherit 都指向本文件）。
+	-->
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+
+	<!--
+	  V8 会分配「可写且可执行」的内存页（WASM 与 JIT 代码空间）。
+	  不申请这条，签名后启动会直接崩在 V8 初始化。
+	-->
+	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+	<true/>
+
+	<!--
+	  Electron 通过 DYLD_* 环境变量把 helper 的库搜索路径传下去。
+	-->
+	<key>com.apple.security.cs.allow-dyld-environment-variables</key>
+	<true/>
+
+	<!--
+	  刻意不加的两条，别顺手补上：
+
+	  1) com.apple.security.app-sandbox
+	     加了它，应用只能访问自己的容器目录，而 PaperVault 的知识库目录是用户
+	     在任意位置自选的（还支持外部编辑器直接改 Markdown）。真要上沙箱，得先
+	     把整个 vault 访问改造成 security-scoped bookmark，那是另一个量级的改动。
+
+	  2) com.apple.security.cs.disable-library-validation
+	     只有加载「非本团队签名」的原生模块才需要。本项目的唯一非 JS 依赖是
+	     sql.js，它是 WASM（当数据读进来，不是可执行代码），不触发库校验。
+	     如果将来引入了原生模块且签名后加载失败，再考虑加这条。
+	-->
+</dict>
+</plist>

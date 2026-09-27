@@ -1,0 +1,27 @@
+node_modules
+out
+dist
+release
+# build/ 里只有图标产物（跑 `npm run icon:build` 就能重建），但签名用的
+# entitlements 是源码，必须提交 —— 所以这里排除目录内容而不是目录本身。
+# 注意不能写成 `build`：父目录被排除后，`!build/xxx` 是无效的。
+build/*
+!build/entitlements.mac.plist
+.DS_Store
+*.log
+.vite
+.pv-inspect
+.smoke
+*.tsbuildinfo
+
+# electron-vite 加载配置时会把 electron.vite.config.ts 转译成同目录的临时文件
+# （名字带时间戳）。它是生成物，而且里面注入了本机绝对路径
+# （__electron_vite_injected_dirname = "/Users/<你的用户名>/..."）——
+# 提交上去等于把用户名和目录结构一起公开。
+electron.vite.config.*.mjs
+
+# 本地密钥，切勿提交
+.env
+.env.local
+.env.*.local
+!.env.example

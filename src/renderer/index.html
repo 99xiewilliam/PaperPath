@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      内容安全策略：核心目的是「掐掉一切远程来源」，而不是把同源资源也管死。
+
+      几条刻意的取舍：
+        - default-src 用 'self' file: 而不是 'none'：兜底保持「自己的资源仍可加载」，
+          这样即使某个指令漏写了，最坏情况也只是少一层限制，而不是整个界面白屏。
+        - 'self' 覆盖开发模式（页面与 Vite dev server 同源）；file: 覆盖打包后的
+          file:// 场景 —— 那时 Chromium 的 origin 是 opaque，'self' 不一定匹配得上，
+          所以显式写上 scheme。
+        - script/style 必须留 'unsafe-inline'：Vite 的 React 刷新前导代码是内联脚本、
+          样式是运行时注入的，去掉会让开发模式直接白屏。
+        - ws:/wss: 给 Vite 的 HMR；blob: 给 pdf.js 的 worker 与位图。
+        - 没有 'unsafe-eval'：pdfjs 已经显式关掉了 isEvalSupported。
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self' file: blob: data:; script-src 'self' 'unsafe-inline' file:; style-src 'self' 'unsafe-inline' file:; img-src 'self' file: data: blob:; font-src 'self' file: data:; connect-src 'self' file: ws: wss:; worker-src 'self' file: blob:; media-src 'self' file: blob:; object-src 'none'; base-uri 'none'; form-action 'none'"
+    />
+    <title>PaperVault · 论文智库</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
