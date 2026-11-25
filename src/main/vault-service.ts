@@ -4,10 +4,9 @@
  * 扫描是启动路径上最重的一步，所以这里的「文件没变就跳过」快路径是
  * 性能关键点，注释里保留原因说明，避免后来者以为是多余的判断。
  */
-import { existsSync, mkdirSync, readFileSync, readdirSync } from 'fs'
-import { basename, extname, join } from 'path'
-import matter from 'gray-matter'
-import type { ScanResult, Synthesis, VaultStatus } from '@shared/types'
+import { existsSync, mkdirSync } from 'fs'
+import type { ScanResult, VaultStatus } from '@shared/types'
+import { rescanCollections } from './collection-service'
 import * as db from './db'
 import { textSnippet } from './papertext'
 import { fileStamp, relativeOf, requireVault } from './runtime'
@@ -26,13 +25,12 @@ export async function loadVault(vaultPath: string): Promise<VaultStatus> {
 export function vaultStatus(): VaultStatus {
   const path = getSettings().vaultPath
   if (!path || !existsSync(path)) {
-    return { opened: false, path: '', paperCount: 0, synthesisCount: 0 }
+    return { opened: false, path: '', paperCount: 0 }
   }
   return {
     opened: true,
     path,
     paperCount: db.paperCount(),
-    synthesisCount: db.synthesisCount()
   }
 }
 
@@ -115,30 +113,7 @@ export async function rescanVault(): Promise<ScanResult> {
   if (signatureChanged) db.metaSet(CATEGORY_SIGNATURE_KEY, categorySignature)
   if (skipped) console.log(`[vault] 扫描跳过 ${skipped} 个未变动的文件`)
 
-  // 同步磁盘上的综述文档
-  const synthDir = join(vaultPath, vault.VAULT_DIRS.syntheses)
-  if (existsSync(synthDir)) {
-    for (const name of readdirSync(synthDir)) {
-      if (extname(name).toLowerCase() !== '.md') continue
-      try {
-        const parsed = matter(readFileSync(join(synthDir, name), 'utf-8'))
-        const data = parsed.data as Record<string, unknown>
-        const id = String(data.id ?? basename(name, '.md'))
-        db.upsertSynthesis({
-          id,
-          title: String(data.title ?? id),
-          scope: (data.scope as Synthesis['scope']) ?? { type: 'category', value: '' },
-          content: parsed.content.trim(),
-          relPath: relativeOf(join(synthDir, name), vaultPath),
-          paperCount: Number(data.paperCount ?? 0),
-          createdAt: data.createdAt ? String(data.createdAt) : undefined,
-          updatedAt: data.updatedAt ? String(data.updatedAt) : undefined
-        })
-      } catch (err) {
-        errors.push(`综述解析失败：${name}（${(err as Error).message}）`)
-      }
-    }
-  }
+  rescanCollections()
 
   db.persistNow()
   return { scanned: files.length, indexed: seen.size, removed, errors }

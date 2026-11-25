@@ -4,16 +4,18 @@ import {
   BookOpen,
   Check,
   CheckCircle2,
+  ChevronDown,
   Download,
   ExternalLink,
   FileText,
   FlaskConical,
   FolderOpen,
-  GraduationCap,
+  Layers,
   Loader2,
   MessageSquare,
+  MoreHorizontal,
+  PenLine,
   Plus,
-  Presentation,
   Sparkles,
   Star,
   Trash2,
@@ -28,6 +30,10 @@ import {
 } from '@shared/template'
 import {
   enabledLensIds,
+  estimateCost,
+  formatCost,
+  formatDuration,
+  formatTokens,
   LENS_META,
   lensMeta,
   RUN_STATUS_LABEL,
@@ -40,16 +46,17 @@ import { insertMarkdownSnippet } from '@shared/figures'
 import { STATUS_LABEL } from '@shared/types'
 import type { PaperMeta, PaperStatus } from '@shared/types'
 import { cn, downloadText, errorMessage } from '@/lib/utils'
-import { useAppStore } from '@/store/useAppStore'
+import { collectionsOfPaper, useAppStore } from '@/store/useAppStore'
+import { AddToCollectionDialog } from './AddToCollectionDialog'
+import { CollectionPanel } from './CollectionPanel'
 import { PdfReader } from './PdfReader'
 import { ExperimentProfilePanel } from './ExperimentProfilePanel'
 import { SectionEditor } from './SectionEditor'
 import { MethodFlowCard } from './MethodFlowCard'
 import { MindMapCard } from './MindMapCard'
-import { QuizPanel } from './QuizPanel'
-import { SlideDeck } from './SlideDeck'
+import { MyThoughts } from './MyThoughts'
+import { ReferencesPanel } from './ReferencesPanel'
 import { ChatPanel } from './ChatPanel'
-import { PaperLinksPanel } from './PaperLinksPanel'
 import { Button, Chip, EmptyState, IconButton, Modal, useConfirm } from './ui'
 
 type Tab = 'notes' | 'source' | 'exp' | 'chat'
@@ -67,11 +74,13 @@ interface Draft {
  * 全都不留痕迹 —— 用户只能对着一片空白猜是论文没写还是系统出错。
  */
 function LastRunBar({
+  paperId,
   record,
   busy,
   onRerun,
   onRetryFailed
 }: {
+  paperId: string
   record?: LensRunRecord | null
   busy: boolean
   /** 按设置里启用的全部维度重跑 */
@@ -80,8 +89,31 @@ function LastRunBar({
   onRetryFailed: (lensIds: LensId[]) => void
 }): JSX.Element | null {
   const [open, setOpen] = useState(false)
-  // 从没跑过就不占位置（注意 useState 必须在这个提前返回之前）
-  if (!record) return null
+  // 从没跑过就不占位置（注意 hooks 必须都在这个提前返回之前）
+  const settings = useAppStore((s) => s.settings)
+
+  /*
+   * 可以关掉。
+   *
+   * 这条提示的职责是「解释笔记为什么是空的」，读明白之后它就是噪音 ——
+   * 尤其是失败了一次、暂时不打算重试的论文，它会在每一篇的顶部各占一行。
+   *
+   * 关闭状态按 `finishedAt` 记：**认的是「哪一次精读」而不是「哪篇论文」**。
+   * 所以下次真跑一次（时间戳变了）它会自己回来，不会因为以前关过就永久失声。
+   */
+  const dismissKey = `papervault.lastrun.dismissed.${paperId}`
+  const [dismissed, setDismissed] = useState(false)
+
+  useEffect(() => {
+    if (!record) return
+    try {
+      setDismissed(localStorage.getItem(dismissKey) === record.finishedAt)
+    } catch {
+      // 隐私模式 / 存储被禁用：不记忆，本次会话内仍可关
+    }
+  }, [dismissKey, record])
+
+  if (!record || dismissed) return null
 
   const failed = record.lenses.filter((l) => !l.ok)
   /*
@@ -98,12 +130,38 @@ function LastRunBar({
         ? 'text-ink-mid'
         : 'text-warn'
 
+  /*
+   * 用量：金额只在用户填了单价时才出现 —— 没填就只显示 token 数。
+   * 显示「¥0.00」比不显示更糟，那会让人以为这次精读是免费的。
+   */
+  const u = record.usage
+  const totalTokens = u ? u.promptTokens + u.completionTokens : 0
+  const costText = u
+    ? formatCost(estimateCost(u, settings.llm.priceInput, settings.llm.priceOutput))
+    : ''
+  const usageTitle = u
+    ? [
+        `${u.calls} 次调用 · ${u.requests} 次请求${
+          u.requests > u.calls ? `（重试 ${u.requests - u.calls} 次）` : ''
+        }`,
+        `输入 ${u.promptTokens.toLocaleString('zh-CN')} / 输出 ${u.completionTokens.toLocaleString('zh-CN')} token`,
+        `耗时 ${formatDuration(u.elapsedMs)}`,
+        u.model ? `模型 ${u.model}` : '',
+        // 天书一样的指纹，作用只有一个：两次精读对一下，就知道 prompt 变没变过
+        `prompt 版本 ${u.prompt}`,
+        u.truncated ? `${u.truncated} 次撞上 max_tokens` : '',
+        u.failed ? `${u.failed} 次失败（同样计费）` : ''
+      ]
+        .filter(Boolean)
+        .join('\n')
+    : ''
+
   return (
     <div
       className={cn(
         'rounded-xl border px-4 py-2.5',
         record.status === 'ok'
-          ? 'border-ok/30 bg-ok/8'
+          ? 'border-ok/30 bg-ok/[0.08]'
           : record.status === 'cancelled'
             ? 'border-line bg-white/[0.04]'
             : 'border-warn/40 bg-warn/10'
@@ -115,19 +173,35 @@ function LastRunBar({
         ) : (
           <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-ok" />
         )}
-        <span className={cn('text-[11.5px] font-medium', tone)}>
+        <span className={cn('text-meta font-medium', tone)}>
           上次精读 · {RUN_STATUS_LABEL[record.status]}
         </span>
-        <span className="text-[10.5px] text-ink-low">
+        <span className="text-caption text-ink-low">
           {new Date(record.finishedAt).toLocaleString('zh-CN')}
         </span>
-        <span className="min-w-0 flex-1 truncate text-[11px] text-ink-mid" title={record.message}>
+        {u ? (
+          <span className="shrink-0 text-caption text-ink-low" title={usageTitle}>
+            {/*
+             * 别显示「0 token」。
+             *
+             * 部分重跑时 usage 只记**本次**那一个维度（见 mergeRunRecord），
+             * 而请求失败时服务商不返回用量，于是整条状态条上写着一个刺眼的
+             * 「0 token」—— 看起来像这次精读没花任何成本，实际上前面几万
+             * token 已经花掉了。真拿不到用量就明说「未计费」。
+             */}
+            {totalTokens > 0
+              ? `${record.message.startsWith('只重试了') ? '本次重试 ' : ''}${formatTokens(totalTokens)} token`
+              : '本次未计费'}
+            {totalTokens > 0 && costText ? ` · ${costText}` : ''}
+          </span>
+        ) : null}
+        <span className="min-w-0 flex-1 truncate text-meta text-ink-mid" title={record.message}>
           {record.message}
         </span>
         {issues.length ? (
           <button
             onClick={() => setOpen((v) => !v)}
-            className="shrink-0 rounded-md border border-line px-2 py-0.5 text-[10.5px] text-ink-low transition hover:border-strong hover:text-ink-mid"
+            className="shrink-0 rounded-md border border-line px-2 py-0.5 text-caption text-ink-low transition hover:border-strong hover:text-ink-mid"
           >
             {open
               ? '收起'
@@ -138,7 +212,7 @@ function LastRunBar({
         ) : null}
         {bad ? (
           busy ? (
-            <span className="shrink-0 rounded-md border border-line px-2 py-0.5 text-[10.5px] text-ink-low">
+            <span className="shrink-0 rounded-md border border-line px-2 py-0.5 text-caption text-ink-low">
               运行中…
             </span>
           ) : (
@@ -153,7 +227,7 @@ function LastRunBar({
               {failed.length ? (
                 <button
                   onClick={() => onRetryFailed(failed.map((l) => l.id))}
-                  className="shrink-0 rounded-md border border-warn/40 px-2 py-0.5 text-[10.5px] text-warn transition hover:bg-warn/10"
+                  className="shrink-0 rounded-md border border-warn/40 px-2 py-0.5 text-caption text-warn transition hover:bg-warn/10"
                 >
                   只重试失败 {failed.length} 个
                 </button>
@@ -161,22 +235,39 @@ function LastRunBar({
               <button
                 onClick={onRerun}
                 title="按设置里启用的全部维度重跑，已经写好的章节会被重新生成"
-                className="shrink-0 rounded-md border border-line px-2 py-0.5 text-[10.5px] text-ink-low transition hover:border-strong hover:text-ink-mid"
+                className="shrink-0 rounded-md border border-line px-2 py-0.5 text-caption text-ink-low transition hover:border-strong hover:text-ink-mid"
               >
                 全部重跑
               </button>
             </>
           )
         ) : null}
+        {/*
+         * 关闭按钮：这条提示的用途是「解释为什么笔记是空的」，看过一次就够了。
+         * 记住的是这一次运行的时间戳，所以下次真跑一次它会自己回来。
+         */}
+        <button
+          onClick={() => {
+            setDismissed(true)
+            try {
+              localStorage.setItem(dismissKey, record.finishedAt)
+            } catch {
+              // 存不进去就只在本次会话内生效
+            }
+          }}
+          title="关掉这条提示（下次精读后会重新出现）"
+          aria-label="关掉上次精读提示"
+          className="-mr-1 shrink-0 rounded-md p-0.5 text-ink-low transition hover:bg-white/10 hover:text-ink-high"
+        >
+          <X className="h-3.5 w-3.5" />
+        </button>
       </div>
 
       {open ? (
         <div className="mt-2 space-y-1.5 border-t border-white/10 pt-2">
           {issues.map((l) => (
-            <div key={l.id} className="text-[11px] leading-relaxed">
-              <span className="font-medium text-ink-high">
-                {l.ok ? `${l.label} ✓` : l.label}
-              </span>
+            <div key={l.id} className="text-meta leading-relaxed">
+              <span className="font-medium text-ink-high">{l.ok ? `${l.label} ✓` : l.label}</span>
               <span className="text-ink-mid">　{l.ok ? l.note : l.message}</span>
             </div>
           ))}
@@ -210,12 +301,23 @@ export function PaperDetail(): JSX.Element {
   const [sourceText, setSourceText] = useState<string | null>(null)
   /** 「原文」标签页的显示方式：默认直接看 PDF 原始版面，而不是提取出来的文字 */
   const [sourceMode, setSourceMode] = useState<'pdf' | 'text'>('pdf')
+  const [pdfJump, setPdfJump] = useState<{ page: number; at: number } | null>(null)
   const [tagInput, setTagInput] = useState('')
   const [extractingProfile, setExtractingProfile] = useState(false)
   const [lensPickerOpen, setLensPickerOpen] = useState(false)
-  const [quizOpen, setQuizOpen] = useState(false)
-  const [presentOpen, setPresentOpen] = useState(false)
+  const [addToCollectionOpen, setAddToCollectionOpen] = useState(false)
+  const [infoOpen, setInfoOpen] = useState(() => localStorage.getItem(INFO_OPEN_KEY) === '1')
+  const toggleInfo = (): void => {
+    setInfoOpen((v) => {
+      localStorage.setItem(INFO_OPEN_KEY, v ? '0' : '1')
+      return !v
+    })
+  }
   const { confirm: askDelete, dialog: deleteDialog } = useConfirm()
+  const collections = useAppStore((s) => s.collections)
+  const collectionId = useAppStore((s) => s.filters.collectionId)
+  const selectCollection = useAppStore((s) => s.selectCollection)
+  const removePapersFromCollection = useAppStore((s) => s.removePapersFromCollection)
 
   /** 实际启用的维度数。设置里存的是「关掉了哪些」，这里换算一次 */
   const enabledCount = enabledLensIds(settings.disabledLenses).length
@@ -263,6 +365,21 @@ export function PaperDetail(): JSX.Element {
     }
     return !!saved
   }, [])
+
+  /**
+   * 保存成功才继续跑 AI。
+   *
+   * 以前这里是一句光秃秃的 `if (!(await flush())) return`：保存失败时点
+   * 「只重试失败 1 个」完全没有任何反馈，看起来就像按钮坏了 —— 而这正是
+   * 「失败重试有 bug」最容易产生的错觉。现在至少说一句为什么没跑。
+   */
+  const flushOrWarn = useCallback(async (): Promise<boolean> => {
+    if (await flush()) return true
+    useAppStore
+      .getState()
+      .toast('笔记还没保存成功，先处理保存错误（右下角会提示原因）再重试', 'error')
+    return false
+  }, [flush])
 
   useEffect(() => {
     const incomingId = detail?.id ?? null
@@ -324,8 +441,16 @@ export function PaperDetail(): JSX.Element {
 
   const loadSource = useCallback(async () => {
     if (!detail || sourceText !== null) return
-    const text = await window.papervault.papers.text(detail.id)
-    setSourceText(text || '（这篇论文还没有抽取到原文，可能是手动建立的条目。）')
+    try {
+      const text = await window.papervault.papers.text(detail.id)
+      setSourceText(text || '（这篇论文还没有抽取到原文，可能是手动建立的条目。）')
+    } catch (err) {
+      /*
+       * 必须落一个终态：sourceText 停在 null 的话，渲染层永远停在那句
+       * 「正在读取原文…」的转圈上 —— 既不报错，也没有重试入口。
+       */
+      setSourceText(`（读取原文失败：${errorMessage(err)}）`)
+    }
   }, [detail, sourceText])
 
   const handleOpenPdf = useCallback(async () => {
@@ -333,8 +458,6 @@ export function PaperDetail(): JSX.Element {
     const res = await window.papervault.papers.openPdf(detail.id)
     if (!res.ok) useAppStore.getState().toast(res.message ?? '无法打开 PDF', 'error')
   }, [detail])
-
-
 
   useEffect(() => {
     if (tab === 'source') void loadSource()
@@ -349,6 +472,7 @@ export function PaperDetail(): JSX.Element {
   }
 
   if (!detail || !draft) {
+    if (collectionId) return <CollectionPanel collectionId={collectionId} />
     return (
       <main className="flex h-full min-w-0 flex-1 items-center justify-center bg-bg-base">
         <EmptyState
@@ -361,7 +485,15 @@ export function PaperDetail(): JSX.Element {
   }
 
   const { meta, sections } = draft
+  const paperCollections = collectionsOfPaper(collections, meta.id)
   const selectedIds = new Set(meta.categories)
+  const infoSummary = [
+    meta.categories.length ? `${meta.categories.length} 分类` : '',
+    meta.tags.length ? `${meta.tags.length} 标签` : '',
+    paperCollections.length ? `${paperCollections.length} 专题` : ''
+  ]
+    .filter(Boolean)
+    .join(' · ')
 
   /** 有没有可以用来抽取实验画像的材料 */
   const hasProfileSource =
@@ -413,7 +545,10 @@ export function PaperDetail(): JSX.Element {
       caret && caret.section === key ? caret.pos : null,
       markdown
     )
-    schedule({ meta: current.meta, sections: { ...current.sections, [key]: result.next } })
+    schedule({
+      meta: current.meta,
+      sections: { ...current.sections, [key]: result.next }
+    })
     caretRef.current = { section: key, pos: result.at }
     useAppStore.getState().toast(`已插入「${key}」`, 'success')
     return key
@@ -423,7 +558,7 @@ export function PaperDetail(): JSX.Element {
     setSummarizing(true)
     useAppStore.getState().setBusy('AI 正在精读全文…')
     try {
-      if (!(await flush())) return
+      if (!(await flushOrWarn())) return
       const res = await window.papervault.ai.summarize(meta.id)
       useAppStore.getState().toast(res.message, res.ok ? 'success' : 'error')
       /*
@@ -451,7 +586,7 @@ export function PaperDetail(): JSX.Element {
     setSummarizing(true)
     useAppStore.getState().setBusy(`正在重试 ${lensIds.length} 个维度…`)
     try {
-      if (!(await flush())) return
+      if (!(await flushOrWarn())) return
       const res = await window.papervault.ai.runLens(meta.id, lensIds)
       useAppStore.getState().toast(res.message, res.ok ? 'success' : 'error')
       await reload()
@@ -467,12 +602,15 @@ export function PaperDetail(): JSX.Element {
     setRewriting(key)
     useAppStore.getState().setBusy(`正在重写「${key}」…`)
     try {
-      if (!(await flush())) return
+      if (!(await flushOrWarn())) return
       const res = await window.papervault.ai.rewriteSection(meta.id, key)
       if (res.ok) {
         const next = {
           meta,
-          sections: { ...(draftRef.current?.sections ?? sections), [key]: res.content }
+          sections: {
+            ...(draftRef.current?.sections ?? sections),
+            [key]: res.content
+          }
         }
         schedule(next)
         useAppStore.getState().toast(`「${key}」已重写`, 'success')
@@ -493,7 +631,7 @@ export function PaperDetail(): JSX.Element {
     setSummarizing(true)
     useAppStore.getState().setBusy(`正在运行「${lensMeta(lensId).label}」…`)
     try {
-      if (!(await flush())) return
+      if (!(await flushOrWarn())) return
       const res = await window.papervault.ai.runLens(meta.id, lensId)
       useAppStore.getState().toast(res.message, res.ok ? 'success' : 'error')
       await reload()
@@ -509,7 +647,7 @@ export function PaperDetail(): JSX.Element {
     setExtractingProfile(true)
     useAppStore.getState().setBusy('正在抽取实验画像…')
     try {
-      if (!(await flush())) return
+      if (!(await flushOrWarn())) return
       const res = await window.papervault.ai.buildProfile(meta.id)
       useAppStore.getState().toast(res.message, res.ok ? 'success' : 'error')
       // 同上：失败也要重载，让「上次运行」的记录显示出来
@@ -589,7 +727,7 @@ export function PaperDetail(): JSX.Element {
               placeholder="论文标题"
               className="w-full bg-transparent font-serif text-[18px] font-semibold leading-snug text-ink-high outline-none placeholder:text-ink-low"
             />
-            <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11.5px] text-ink-mid">
+            <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-meta text-ink-mid">
               <input
                 value={meta.authors.join(', ')}
                 onChange={(e) =>
@@ -601,7 +739,7 @@ export function PaperDetail(): JSX.Element {
                   })
                 }
                 placeholder="作者（逗号分隔）"
-                className="min-w-[180px] flex-1 bg-transparent font-serif text-[12px] text-ink-mid outline-none placeholder:font-sans placeholder:text-ink-low"
+                className="min-w-[180px] flex-1 bg-transparent font-serif text-ui text-ink-mid outline-none placeholder:font-sans placeholder:text-ink-low"
               />
               {/*
                * 年份 / 会议是「编目字段」：做成目录卡上的下划线填空，而不是
@@ -611,16 +749,18 @@ export function PaperDetail(): JSX.Element {
               <input
                 value={meta.year ?? ''}
                 onChange={(e) =>
-                  patchMeta({ year: e.target.value ? Number(e.target.value) || null : null })
+                  patchMeta({
+                    year: e.target.value ? Number(e.target.value) || null : null
+                  })
                 }
                 placeholder="年份"
-                className="w-14 border-b border-line bg-transparent px-1 py-0.5 text-center font-mono text-[11px] outline-none transition placeholder:font-sans placeholder:text-ink-low focus:border-brand-soft"
+                className="w-14 border-b border-line bg-transparent px-1 py-0.5 text-center font-mono text-meta outline-none transition placeholder:font-sans placeholder:text-ink-low focus:border-brand-soft"
               />
               <input
                 value={meta.venue}
                 onChange={(e) => patchMeta({ venue: e.target.value })}
                 placeholder="会议 / 期刊"
-                className="w-40 border-b border-line bg-transparent px-1 py-0.5 font-serif text-[11.5px] italic outline-none transition placeholder:font-sans placeholder:not-italic placeholder:text-ink-low focus:border-brand-soft"
+                className="w-40 border-b border-line bg-transparent px-1 py-0.5 font-serif text-meta italic outline-none transition placeholder:font-sans placeholder:not-italic placeholder:text-ink-low focus:border-brand-soft"
               />
               {meta.arxivId ? (
                 <button
@@ -642,6 +782,31 @@ export function PaperDetail(): JSX.Element {
                   <ExternalLink className="h-3 w-3" />
                 </button>
               ) : null}
+              <span className="ml-auto flex items-center gap-2.5">
+                <Stars value={meta.rating} onChange={(v) => patchMeta({ rating: v })} />
+                <select
+                  value={meta.status}
+                  onChange={(e) => patchMeta({ status: e.target.value as PaperStatus })}
+                  className="rounded border border-line bg-bg-raised px-1.5 py-0.5 text-meta text-ink-mid outline-none focus:border-brand/50"
+                >
+                  {(Object.keys(STATUS_LABEL) as PaperStatus[]).map((s) => (
+                    <option key={s} value={s} className="bg-bg-overlay">
+                      {STATUS_LABEL[s]}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  onClick={toggleInfo}
+                  title={infoOpen ? '收起分类 / 标签 / 专题' : '展开分类 / 标签 / 专题'}
+                  className={cn(
+                    'inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-meta transition hover:bg-white/[0.06] hover:text-ink-high',
+                    infoOpen ? 'text-ink-high' : 'text-ink-low'
+                  )}
+                >
+                  {infoSummary || '分类 / 标签'}
+                  <ChevronDown className={cn('h-3 w-3 transition', infoOpen && 'rotate-180')} />
+                </button>
+              </span>
             </div>
           </div>
 
@@ -655,134 +820,150 @@ export function PaperDetail(): JSX.Element {
             >
               {summarizing ? '运行中' : 'AI 精读'}
             </Button>
-            <Button
-              size="sm"
-              icon={<GraduationCap className="h-3.5 w-3.5" />}
-              title="AI 按原文出几道理解题，测测你是不是真读懂了（解析带原文出处）"
-              onClick={() => setQuizOpen(true)}
-            >
-              考考我{meta.quiz ? ` ${meta.quiz.questions.length}题` : ''}
-            </Button>
-            <Button
-              size="sm"
-              icon={<Presentation className="h-3.5 w-3.5" />}
-              title="把这篇论文拆成一页页，讲给没读过它的人听（全屏演示，可显示口播讲稿）"
-              onClick={() => setPresentOpen(true)}
-            >
-              演示{meta.slides ? ` ${meta.slides.slides.length + 1}页` : ''}
-            </Button>
             {meta.pdf ? (
-              <>
-                <IconButton title="预览 PDF（独立窗口）" onClick={() => void handleOpenPdf()}>
-                  <FileText className="h-4 w-4" />
-                </IconButton>
-                <IconButton
-                  title="在文件夹中显示 PDF"
-                  onClick={() => void window.papervault.vault.reveal(meta.pdf)}
-                >
-                  <FolderOpen className="h-4 w-4" />
-                </IconButton>
-              </>
+              <IconButton title="预览 PDF（独立窗口）" onClick={() => void handleOpenPdf()}>
+                <FileText className="h-4 w-4" />
+              </IconButton>
             ) : null}
-            <IconButton title="导出为 Markdown" onClick={handleExport}>
-              <Download className="h-4 w-4" />
-            </IconButton>
-            <IconButton
-              title="删除这篇笔记"
-              onClick={() => {
-                void askDelete({
-                  title: '删除这篇笔记？',
-                  description: `《${meta.title}》的精读笔记与已归档的 PDF 副本都会被删除，此操作不可撤销。`,
-                  confirmLabel: '删除',
-                  danger: true
-                }).then((ok) => {
-                  if (ok) void useAppStore.getState().deletePaper(meta.id)
-                })
-              }}
-            >
-              <Trash2 className="h-4 w-4" />
-            </IconButton>
+            <MoreMenu
+              items={[
+                ...(meta.pdf
+                  ? [
+                      {
+                        label: '在文件夹中显示 PDF',
+                        icon: FolderOpen,
+                        onClick: () => void window.papervault.vault.reveal(meta.pdf)
+                      }
+                    ]
+                  : []),
+                {
+                  label: '导出为 Markdown',
+                  icon: Download,
+                  onClick: handleExport
+                },
+                {
+                  label: '删除这篇笔记',
+                  icon: Trash2,
+                  danger: true,
+                  onClick: () => {
+                    void askDelete({
+                      title: '删除这篇笔记？',
+                      description: `《${meta.title}》的精读笔记与已归档的 PDF 副本都会被删除，此操作不可撤销。`,
+                      confirmLabel: '删除',
+                      danger: true
+                    }).then((ok) => {
+                      if (ok) void useAppStore.getState().deletePaper(meta.id)
+                    })
+                  }
+                }
+              ]}
+            />
           </div>
         </div>
 
-        {/* 第二行：分类 / 状态 / 评分 */}
-        <div className="mt-2.5 flex flex-wrap items-center gap-x-3 gap-y-2">
-          <div className="flex flex-wrap items-center gap-1">
-            {meta.categories.map((id) => (
-              <Chip
-                key={id}
-                color={categoryColor(id, settings.customCategories)}
-                active
-                onClick={() => patchMeta({ categories: meta.categories.filter((c) => c !== id) })}
-                title="点击移除"
-              >
-                {categoryLabel(id, settings.customCategories)}
-                <X className="h-2.5 w-2.5" />
-              </Chip>
-            ))}
-            <button
-              onClick={() => setCategoryOpen(true)}
-              className="chip border-dashed text-ink-low transition hover:border-brand/60 hover:text-brand-mist"
-            >
-              <Plus className="h-2.5 w-2.5" />
-              分类
-            </button>
-          </div>
-
-          <div className="ml-auto flex items-center gap-3">
-            <Stars value={meta.rating} onChange={(v) => patchMeta({ rating: v })} />
-            <label className="flex items-center gap-1.5 text-[11px] text-ink-low">
-              重要性
-              <select
-                value={meta.importance}
-                onChange={(e) => patchMeta({ importance: Number(e.target.value) })}
-                className="rounded border border-line bg-bg-raised px-1.5 py-0.5 text-[11px] text-ink-mid outline-none focus:border-brand/50"
-              >
-                {[1, 2, 3, 4, 5].map((n) => (
-                  <option key={n} value={n} className="bg-bg-overlay">
-                    {n}
-                  </option>
+        {infoOpen ? (
+          <div className="mt-2.5 space-y-1.5 rounded-lg border border-line bg-white/[0.02] px-3 py-2">
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+              <div className="flex flex-wrap items-center gap-1">
+                {meta.categories.map((id) => (
+                  <Chip
+                    key={id}
+                    color={categoryColor(id, settings.customCategories)}
+                    active
+                    onClick={() =>
+                      patchMeta({
+                        categories: meta.categories.filter((c) => c !== id)
+                      })
+                    }
+                    title="点击移除"
+                  >
+                    {categoryLabel(id, settings.customCategories)}
+                    <X className="h-2.5 w-2.5" />
+                  </Chip>
                 ))}
-              </select>
-            </label>
-            <select
-              value={meta.status}
-              onChange={(e) => patchMeta({ status: e.target.value as PaperStatus })}
-              className="rounded border border-line bg-bg-raised px-1.5 py-0.5 text-[11px] text-ink-mid outline-none focus:border-brand/50"
-            >
-              {(Object.keys(STATUS_LABEL) as PaperStatus[]).map((s) => (
-                <option key={s} value={s} className="bg-bg-overlay">
-                  {STATUS_LABEL[s]}
-                </option>
+                <button
+                  onClick={() => setCategoryOpen(true)}
+                  className="chip border-dashed text-ink-low transition hover:border-brand/60 hover:text-brand-mist"
+                >
+                  <Plus className="h-2.5 w-2.5" />
+                  分类
+                </button>
+              </div>
+
+              <div className="ml-auto flex items-center gap-3">
+                <label className="flex items-center gap-1.5 text-meta text-ink-low">
+                  重要性
+                  <select
+                    value={meta.importance}
+                    onChange={(e) => patchMeta({ importance: Number(e.target.value) })}
+                    className="rounded border border-line bg-bg-raised px-1.5 py-0.5 text-meta text-ink-mid outline-none focus:border-brand/50"
+                  >
+                    {[1, 2, 3, 4, 5].map((n) => (
+                      <option key={n} value={n} className="bg-bg-overlay">
+                        {n}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-1">
+              {meta.tags.map((t) => (
+                <Chip key={t} onClick={() => patchMeta({ tags: meta.tags.filter((x) => x !== t) })}>
+                  #{t}
+                  <X className="h-2.5 w-2.5" />
+                </Chip>
               ))}
-            </select>
+              <input
+                value={tagInput}
+                onChange={(e) => setTagInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault()
+                    addTag()
+                  }
+                }}
+                onBlur={addTag}
+                placeholder="+ 标签"
+                className="w-24 bg-transparent text-meta text-ink-mid outline-none placeholder:text-ink-low"
+              />
+            </div>
+
+            <div className="flex flex-wrap items-center gap-1">
+              {paperCollections.map((c) => (
+                <Chip
+                  key={c.id}
+                  active={collectionId === c.id}
+                  onClick={() => selectCollection(c.id)}
+                  title="查看这个专题"
+                  className="gap-1"
+                >
+                  <Layers className="h-2.5 w-2.5" />
+                  {c.title}
+                  <button
+                    type="button"
+                    title="从专题移出"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      void removePapersFromCollection(c.id, [meta.id])
+                    }}
+                    className="rounded p-0.5 text-ink-low hover:text-warn"
+                  >
+                    <X className="h-2.5 w-2.5" />
+                  </button>
+                </Chip>
+              ))}
+              <button
+                type="button"
+                onClick={() => setAddToCollectionOpen(true)}
+                className="chip cursor-pointer text-ink-low hover:border-strong hover:text-ink-mid"
+              >
+                + 专题
+              </button>
+            </div>
           </div>
-        </div>
-
-        {/* 标签 */}
-        <div className="mt-2 flex flex-wrap items-center gap-1">
-          {meta.tags.map((t) => (
-            <Chip key={t} onClick={() => patchMeta({ tags: meta.tags.filter((x) => x !== t) })}>
-              #{t}
-              <X className="h-2.5 w-2.5" />
-            </Chip>
-          ))}
-          <input
-            value={tagInput}
-            onChange={(e) => setTagInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') {
-                e.preventDefault()
-                addTag()
-              }
-            }}
-            onBlur={addTag}
-            placeholder="+ 标签"
-            className="w-24 bg-transparent text-[11px] text-ink-mid outline-none placeholder:text-ink-low"
-          />
-        </div>
-
-        <PaperLinksPanel meta={meta} papers={papers} onChange={(links) => patchMeta({ links })} />
+        ) : null}
 
         {/*
          * Tabs 用期刊式「ruling」下划线：激活项压一条松绿短线在页眉的
@@ -801,10 +982,8 @@ export function PaperDetail(): JSX.Element {
               key={key}
               onClick={() => setTab(key)}
               className={cn(
-                'relative inline-flex items-center gap-1.5 px-2.5 py-1.5 text-[12px] transition',
-                tab === key
-                  ? 'font-medium text-ink-high'
-                  : 'text-ink-mid hover:text-ink-high'
+                'relative inline-flex items-center gap-1.5 px-2.5 py-1.5 text-ui transition',
+                tab === key ? 'font-medium text-ink-high' : 'text-ink-mid hover:text-ink-high'
               )}
             >
               <Icon className={cn('h-3.5 w-3.5', tab === key ? 'text-brand-soft' : '')} />
@@ -815,7 +994,7 @@ export function PaperDetail(): JSX.Element {
               ) : null}
             </button>
           ))}
-          <span className="ml-auto flex items-center gap-1.5 text-[10.5px] text-ink-low">
+          <span className="ml-auto flex items-center gap-1.5 text-caption text-ink-low">
             {saveState === 'pending' ? (
               <>
                 <Loader2 className="h-3 w-3 animate-spin" />
@@ -827,14 +1006,16 @@ export function PaperDetail(): JSX.Element {
                 已保存到 Markdown
               </>
             ) : saveState === 'error' ? (
-              <button className="text-warn underline" onClick={() => void flush()}>保存失败，点击重试</button>
+              <button className="text-warn underline" onClick={() => void flush()}>
+                保存失败，点击重试
+              </button>
             ) : null}
           </span>
           {/* 只在看 PDF 时出现：展开 / 收起页眉里那堆论文信息 */}
           {showPdfViewer ? (
             <button
               onClick={() => setPdfFocus((v) => !v)}
-              className="ml-2 shrink-0 rounded-lg border border-line px-2 py-0.5 text-[10.5px] text-ink-low transition hover:border-strong hover:text-ink-mid"
+              className="ml-2 shrink-0 rounded-lg border border-line px-2 py-0.5 text-caption text-ink-low transition hover:border-strong hover:text-ink-mid"
             >
               {pdfFocus ? '显示论文信息' : '收起论文信息'}
             </button>
@@ -858,10 +1039,19 @@ export function PaperDetail(): JSX.Element {
               最需要的解释就在这里 —— 是没跑过、跑失败了，还是论文确实没内容。
             */}
             <LastRunBar
+              paperId={detail.meta.id}
               record={detail.lastRun}
               busy={summarizing}
               onRerun={() => void handleSummarize()}
               onRetryFailed={(ids) => void handleRetryFailed(ids)}
+            />
+            <MyThoughts
+              highlights={meta.highlights ?? []}
+              onOpen={(page) => {
+                if (detail.hasPdf) setSourceMode('pdf')
+                setPdfJump({ page, at: Date.now() })
+                setTab('source')
+              }}
             />
             {SECTION_GROUP_ORDER.map((group) => {
               const keys = sectionKeys.filter((k) => sectionGroup(k) === group)
@@ -872,9 +1062,23 @@ export function PaperDetail(): JSX.Element {
                    * 分组标题后接一段带铜色的细线（gilt rule）——纸书里章首
                    * 装饰线的做法，比一条灰色分隔线多一点「装帧」的意思。
                    */}
-                  <h3 className="flex items-center gap-2.5 text-[11px] font-medium uppercase tracking-wider text-ink-low">
+                  <h3 className="flex items-center gap-2.5 text-meta font-medium uppercase tracking-wider text-ink-low">
                     {group}
                     <span className="h-px flex-1 bg-gradient-to-r from-brand/30 to-line" />
+                    {/*
+                      这几节散文回答「这一节怎么写」，而「为什么这么写、引用在承担什么」
+                      是跨篇才看得出来的东西 —— 入口统一放「写作思路」页，不在这里重复。
+                    */}
+                    {group === '写作拆解' ? (
+                      <button
+                        onClick={() => useAppStore.getState().openWriting(meta.id)}
+                        title="在「写作思路」里看结构化拆解：故事线、逐段引用功能、优势对齐、贡献回扣"
+                        className="flex shrink-0 items-center gap-1 rounded px-1 py-0.5 text-caption normal-case tracking-normal text-ink-low transition hover:bg-white/[0.06] hover:text-brand-mist"
+                      >
+                        <PenLine className="h-3 w-3" />
+                        写作思路
+                      </button>
+                    ) : null}
                   </h3>
                   {/*
                     思维导图挂在「速览」分组最上面：它是整篇的结构总览，
@@ -905,6 +1109,7 @@ export function PaperDetail(): JSX.Element {
                 </section>
               )
             })}
+            <ReferencesPanel paperId={meta.id} hasSource={detail.hasPdf} />
           </div>
         ) : null}
 
@@ -942,7 +1147,7 @@ export function PaperDetail(): JSX.Element {
                     key={mode}
                     onClick={() => setSourceMode(mode)}
                     className={cn(
-                      'rounded-lg border px-2.5 py-1 text-[11.5px] transition',
+                      'rounded-lg border px-2.5 py-1 text-meta transition',
                       sourceMode === mode
                         ? 'border-brand/50 bg-brand/10 text-brand-mist'
                         : 'border-line text-ink-mid hover:border-strong hover:text-ink-high'
@@ -951,12 +1156,14 @@ export function PaperDetail(): JSX.Element {
                     {label}
                   </button>
                 ))}
-                <span className="ml-1 text-[10.5px] text-ink-low">
-                  {sourceMode === 'pdf' ? '原始版面，可缩放与页内搜索' : '供复制粘贴与检索用的纯文本'}
+                <span className="ml-1 text-caption text-ink-low">
+                  {sourceMode === 'pdf'
+                    ? '原始版面，可缩放与页内搜索'
+                    : '供复制粘贴与检索用的纯文本'}
                 </span>
                 <button
                   onClick={() => void handleOpenPdf()}
-                  className="ml-auto flex items-center gap-1 rounded-lg border border-line px-2 py-1 text-[11px] text-ink-mid transition hover:border-strong hover:text-ink-high"
+                  className="ml-auto flex items-center gap-1 rounded-lg border border-line px-2 py-1 text-meta text-ink-mid transition hover:border-strong hover:text-ink-high"
                 >
                   <ExternalLink className="h-3 w-3" />
                   独立窗口
@@ -972,6 +1179,7 @@ export function PaperDetail(): JSX.Element {
                   highlights={meta.highlights ?? []}
                   onHighlightsChange={(next) => patchMeta({ highlights: next })}
                   onInsertToNote={insertToNote}
+                  jumpTo={pdfJump}
                 />
               </div>
             ) : sourceText === null ? (
@@ -979,7 +1187,7 @@ export function PaperDetail(): JSX.Element {
                 <Loader2 className="h-5 w-5 animate-spin text-brand-soft" />
               </div>
             ) : (
-              <pre className="whitespace-pre-wrap rounded-xl border border-line bg-bg-raised p-4 font-mono text-[12px] leading-relaxed text-ink-mid">
+              <pre className="whitespace-pre-wrap rounded-xl border border-line bg-bg-raised p-4 font-mono text-ui leading-relaxed text-ink-mid">
                 {sourceText}
               </pre>
             )}
@@ -1031,23 +1239,19 @@ export function PaperDetail(): JSX.Element {
               >
                 <div className="min-w-0 flex-1">
                   <div className="flex items-baseline gap-2">
-                    <span className="text-[12.5px] font-medium text-ink-high">{lens.label}</span>
-                    <span className="font-mono text-[10px] text-ink-low">{lens.id}</span>
-                    {!enabled ? (
-                      <span className="text-[10px] text-warn">设置里已关闭</span>
-                    ) : null}
+                    <span className="text-ui font-medium text-ink-high">{lens.label}</span>
+                    <span className="font-mono text-caption text-ink-low">{lens.id}</span>
+                    {!enabled ? <span className="text-caption text-warn">设置里已关闭</span> : null}
                   </div>
-                  <p className="mt-0.5 text-[11px] leading-relaxed text-ink-low">
+                  <p className="mt-0.5 text-meta leading-relaxed text-ink-low">
                     {lens.description}
                   </p>
                   {lens.sections.length ? (
-                    <p className="mt-1 text-[10px] leading-relaxed text-ink-low">
+                    <p className="mt-1 text-caption leading-relaxed text-ink-low">
                       写入：{lens.sections.join('、')}
                     </p>
                   ) : (
-                    <p className="mt-1 text-[10px] text-ink-low">
-                      不写章节，只产出结构化数据
-                    </p>
+                    <p className="mt-1 text-caption text-ink-low">不写章节，只产出结构化数据</p>
                   )}
                 </div>
                 <Button
@@ -1069,12 +1273,16 @@ export function PaperDetail(): JSX.Element {
         onClose={() => setCategoryOpen(false)}
         title="选择分类"
         subtitle="可以多选。分类决定了「套路归纳」时这篇论文会和谁放在一起比较。"
-        footer={<Button variant="subtle" onClick={() => setCategoryOpen(false)}>完成</Button>}
+        footer={
+          <Button variant="subtle" onClick={() => setCategoryOpen(false)}>
+            完成
+          </Button>
+        }
       >
         <div className="space-y-4">
           {categoryGroups.map((group) => (
             <div key={group.group}>
-              <div className="mb-1.5 text-[10.5px] font-medium uppercase tracking-wider text-ink-low">
+              <div className="mb-1.5 text-caption font-medium uppercase tracking-wider text-ink-low">
                 {group.group}
               </div>
               <div className="grid grid-cols-2 gap-1.5">
@@ -1102,11 +1310,11 @@ export function PaperDetail(): JSX.Element {
                         style={{ background: node.color ?? '#7A766D' }}
                       />
                       <span className="min-w-0">
-                        <span className="block text-[12px] font-medium text-ink-high">
+                        <span className="block text-ui font-medium text-ink-high">
                           {node.label}
                         </span>
                         {node.description ? (
-                          <span className="mt-0.5 block text-[10.5px] leading-snug text-ink-low">
+                          <span className="mt-0.5 block text-caption leading-snug text-ink-low">
                             {node.description}
                           </span>
                         ) : null}
@@ -1123,27 +1331,72 @@ export function PaperDetail(): JSX.Element {
         </div>
       </Modal>
 
+      <AddToCollectionDialog
+        open={addToCollectionOpen}
+        onClose={() => setAddToCollectionOpen(false)}
+        paperIds={[meta.id]}
+      />
+
       {deleteDialog}
-
-      <QuizPanel
-        paperId={meta.id}
-        quiz={meta.quiz}
-        open={quizOpen}
-        onClose={() => setQuizOpen(false)}
-        // 新题在主进程已落盘（frontmatter），这里只同步本地状态
-        onGenerated={(quiz) => patchMeta({ quiz })}
-      />
-
-      <SlideDeck
-        paperId={meta.id}
-        meta={meta}
-        sections={sections}
-        open={presentOpen}
-        onClose={() => setPresentOpen(false)}
-        // 演示稿同样已在主进程落盘（frontmatter），这里只同步本地状态
-        onGenerated={(slides) => patchMeta({ slides })}
-      />
     </main>
+  )
+}
+
+const INFO_OPEN_KEY = 'pv.detail.infoOpen'
+
+interface MoreMenuItem {
+  label: string
+  icon: typeof Download
+  onClick: () => void
+  danger?: boolean
+}
+
+function MoreMenu({ items }: { items: MoreMenuItem[] }): JSX.Element {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    const onDown = (e: MouseEvent): void => {
+      if (!ref.current?.contains(e.target as Node)) setOpen(false)
+    }
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') setOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [open])
+
+  return (
+    <div ref={ref} className="relative">
+      <IconButton title="更多操作" onClick={() => setOpen((v) => !v)}>
+        <MoreHorizontal className="h-4 w-4" />
+      </IconButton>
+      {open ? (
+        <div className="absolute right-0 top-full z-30 mt-1 min-w-[168px] rounded-lg border border-line bg-bg-overlay py-1 shadow-xl">
+          {items.map(({ label, icon: Icon, onClick, danger }) => (
+            <button
+              key={label}
+              onClick={() => {
+                setOpen(false)
+                onClick()
+              }}
+              className={cn(
+                'flex w-full items-center gap-2 px-3 py-1.5 text-left text-ui transition hover:bg-white/[0.06]',
+                danger ? 'text-warn' : 'text-ink-mid hover:text-ink-high'
+              )}
+            >
+              <Icon className="h-3.5 w-3.5" />
+              {label}
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </div>
   )
 }
 

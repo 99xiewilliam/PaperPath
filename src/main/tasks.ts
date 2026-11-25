@@ -147,9 +147,12 @@ export const tasks = new TaskRunner()
 /* ------------------------------------------------------------------ */
 
 /**
- * 在跑的交互任务。用 Set 而不是队列：交互请求「跑一次就走」，**排队正是要消灭的东西**。
+ * 在跑的交互任务。用 Map 而不是队列：交互请求「跑一次就走」，**排队正是要消灭的东西**。
+ *
+ * value 是可选标识：绝大多数交互任务几秒就结束、不需要单独取消，
+ * 但「演示生成」要跑几分钟，得让用户能只掐它一个（见 cancelInteractive）。
  */
-const interactiveRuns = new Set<AbortController>()
+const interactiveRuns = new Map<AbortController, string | undefined>()
 
 export function activeInteractiveCount(): number {
   return interactiveRuns.size
@@ -167,19 +170,29 @@ export function activeInteractiveCount(): number {
  *   2. 每个任务用**自己的** controller，并把 signal 显式传下去（llm.ts 的
  *      options.signal）—— 否则它会去拿批处理的信号，变成「精读被取消时翻译跟着挂」。
  */
-export function runInteractive<T>(fn: (signal: AbortSignal) => Promise<T>): Promise<T> {
+export function runInteractive<T>(fn: (signal: AbortSignal) => Promise<T>, key?: string): Promise<T> {
   const controller = new AbortController()
-  interactiveRuns.add(controller)
+  interactiveRuns.set(controller, key)
   return fn(controller.signal).finally(() => {
     interactiveRuns.delete(controller)
   })
 }
 
-/** 取消所有在跑的交互任务（切换知识库这类场景用） */
-export function cancelInteractive(): number {
-  const count = interactiveRuns.size
-  for (const controller of interactiveRuns) controller.abort()
-  interactiveRuns.clear()
+/**
+ * 取消交互任务。
+ *
+ * 传 `key` 时**只**取消带这个标识的：长任务（演示生成要跑几分钟）必须能单独取消 ——
+ * 用户点它的取消按钮时，不该顺带掐掉旁边正在跑的划词翻译。
+ * 不传则取消全部，那是「切换知识库」这类场景：那一刻所有在跑的请求都已经失效了。
+ */
+export function cancelInteractive(key?: string): number {
+  let count = 0
+  for (const [controller, k] of interactiveRuns) {
+    if (key !== undefined && k !== key) continue
+    controller.abort()
+    interactiveRuns.delete(controller)
+    count++
+  }
   return count
 }
 

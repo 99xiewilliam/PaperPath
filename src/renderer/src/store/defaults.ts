@@ -1,6 +1,12 @@
 import type { AppSettings } from '@shared/types'
 
-/** 渲染层在拿到主进程设置前的占位值，字段与主进程保持一致 */
+/**
+ * 渲染层在拿到主进程设置前的占位值。
+ *
+ * **必须与 main/settings.ts 的 DEFAULT_SETTINGS 保持一致**：
+ * 两份漂移的表现是「设置页显示某个维度已关闭，运行时照样跑」——
+ * 而且只在首屏渲染的那一瞬间出现，极难复现。改一边就改另一边。
+ */
 export const DEFAULT_SETTINGS: AppSettings = {
   vaultPath: '',
   llm: {
@@ -14,7 +20,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
   pdfDarkMode: false,
   customCategories: [],
   customSections: [],
-  disabledLenses: []
+  // 与主进程一致：图表与可视化设计默认关闭
+  disabledLenses: ['visuals'],
+  settingsVersion: 2
 }
 
 export const LLM_PRESETS = [

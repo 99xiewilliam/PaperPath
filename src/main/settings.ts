@@ -1,8 +1,14 @@
 import { app, safeStorage } from 'electron'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { dirname, join } from 'path'
-import { disabledLensesFromLegacy } from '@shared/lenses'
-import type { AppSettings, EnvConfigInfo, LlmSettings } from '@shared/types'
+import { allLensIds, disabledLensesFromLegacy } from '@shared/lenses'
+import {
+  LLM_PROVIDER_IDS,
+  type AppSettings,
+  type EnvConfigInfo,
+  type LlmProviderId,
+  type LlmSettings
+} from '@shared/types'
 
 /* ------------------------------------------------------------------ */
 /*  API Key 的静态加密                                                  */
@@ -47,6 +53,19 @@ function decryptSecret(raw: Record<string, unknown>): string {
   return typeof raw.apiKey === 'string' ? raw.apiKey : ''
 }
 
+/**
+ * 设置结构版本。改「必须对老用户生效一次的默认值」时把它 +1，
+ * 并在 `migrateSettings` 里补一条分支。
+ *
+ * 必须声明在 `DEFAULT_SETTINGS` 之前：后者初始化时就要读它，
+ * 写在后面会撞上 const 的暂时性死区（模块一加载就抛 ReferenceError）。
+ *
+ * 历史：
+ *   1 → 2：`visuals` 维度改为默认关闭
+ *   2 → 3：`graph` 维度下线，从 `disabledLenses` 里清掉已不存在的 id
+ */
+export const SETTINGS_VERSION = 3
+
 export const DEFAULT_SETTINGS: AppSettings = {
   vaultPath: '',
   llm: {
@@ -56,15 +75,60 @@ export const DEFAULT_SETTINGS: AppSettings = {
     temperature: 0.3,
     // 推理型模型会把 reasoning token 也算进 max_tokens，
     // 给低了会把 JSON 尾部截断，所以默认放宽到 16k。
-    maxTokens: 16384
+    maxTokens: 16384,
+    // 0 = 未填。界面据此只显示 token 数、不显示金额（见 shared/types.ts 的说明）
+    priceInput: 0,
+    priceOutput: 0
   },
   autoSummarizeOnImport: true,
   pdfDarkMode: false,
   pdfShowAiHighlights: true,
   customCategories: [],
   customSections: [],
-  // 空数组 = 全部维度都启用；这里是 opt-out，新增维度自动生效
-  disabledLenses: []
+  /*
+   * opt-out 列表（存「关掉了哪些」而不是「启用了哪些」），新增维度自动生效。
+   *
+   * 默认关掉 `visuals`（图表与可视化设计）：它产出的那一节在实际使用里
+   * 很少被回头看，却是每次精读都跑一遍的固定成本。想用的人到
+   * 设置 → 分析维度里打开即可。
+   *
+   * 老用户的这个数组里没有 visuals，靠下面 `settingsVersion` 的迁移补上 ——
+   * 只改默认值对他们无效（默认值只在没有 settings.json 时生效）。
+   */
+  disabledLenses: ['visuals'],
+  settingsVersion: SETTINGS_VERSION
+}
+
+/**
+ * 把磁盘上的老设置升级到当前版本。
+ *
+ * 幂等：版本号已经追平就直接返回。**必须幂等**——写成「每次启动都补一遍」，
+ * 用户手动把图表维度打开之后，下次启动又会被关掉，而且没有任何提示。
+ *
+ * 在 `app.whenReady()` 里、任何 `getSettings()` 之前调用：它要改写的是
+ * 磁盘上那份配置，晚于读取就会被别的模块先缓存进内存。
+ */
+export function migrateSettings(): void {
+  const current = readSettingsFile()
+  const from = current.settingsVersion ?? 1
+  if (from >= SETTINGS_VERSION) return
+
+  const patch: Partial<AppSettings> = { settingsVersion: SETTINGS_VERSION }
+  const disabled = new Set(current.disabledLenses ?? [])
+  if (from < 2) disabled.add('visuals')
+  if (from < 3) {
+    /*
+     * 知识图谱维度已整块下线：opt-out 清单里留一个不存在的 id 不会报错
+     * （enabledLensIds 按 LENS_META 过滤），但配置会越攒越脏，
+     * 设置页也解释不了那一条是什么。顺手清掉。
+     */
+    const known = new Set(allLensIds())
+    for (const id of [...disabled]) if (!known.has(id)) disabled.delete(id)
+  }
+  patch.disabledLenses = [...disabled]
+
+  console.log(`[settings] 配置迁移 ${from} → ${SETTINGS_VERSION}`, patch)
+  setSettings(patch)
 }
 
 /* ------------------------------------------------------------------ */
@@ -193,6 +257,7 @@ function resolveEnv(): EnvResolution {
   const temperatureRaw = readVar('PAPERVAULT_LLM_TEMPERATURE')
   const maxTokensRaw = readVar('PAPERVAULT_LLM_MAX_TOKENS')
   const extraBodyRaw = readVar('PAPERVAULT_LLM_EXTRA_BODY')
+  const providerRaw = readVar('PAPERVAULT_LLM_PROVIDER')
   const vaultPath = readVar('PAPERVAULT_VAULT_PATH')
   const { files } = loadEnv()
 
@@ -230,6 +295,18 @@ function resolveEnv(): EnvResolution {
     if (parsed) {
       llm.extraBody = parsed
       overridden.push('llm.extraBody')
+    }
+  }
+  if (providerRaw != null) {
+    const id = providerRaw.trim()
+    if ((LLM_PROVIDER_IDS as readonly string[]).includes(id)) {
+      llm.provider = id as LlmProviderId
+      overridden.push('llm.provider')
+    } else {
+      console.error(
+        `[settings] PAPERVAULT_LLM_PROVIDER 只认 ${LLM_PROVIDER_IDS.join(' / ')}，已忽略：`,
+        providerRaw
+      )
     }
   }
   if (vaultPath) overridden.push('vaultPath')
@@ -295,9 +372,7 @@ export function getSettings(): AppSettings {
   // 知识库路径只作为「首次运行的默认值」：一旦用户在界面上选过，
   // 就以界面选择为准，避免 .env 把目录钉死导致「更换目录」点了没反应。
   const vaultPath = base.vaultPath || env.vaultPath || ''
-  const overridden = env.overridden.filter(
-    (key) => key !== 'vaultPath' || !base.vaultPath
-  )
+  const overridden = env.overridden.filter((key) => key !== 'vaultPath' || !base.vaultPath)
 
   return {
     ...base,

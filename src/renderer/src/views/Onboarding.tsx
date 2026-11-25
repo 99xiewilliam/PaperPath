@@ -1,4 +1,4 @@
-import { FlaskConical, FolderOpen, Layers, PenTool, Sparkles, Wand2 } from 'lucide-react'
+import { FlaskConical, FolderOpen, Layers, PenTool, Sparkles, Table2 } from 'lucide-react'
 import { useAppStore } from '@/store/useAppStore'
 import { Button } from '@/components/ui'
 
@@ -19,9 +19,9 @@ const FEATURES = [
     desc: 'Benchmark、RAG 方法、具身智能、训练与对齐……21 个内置细分类，还能自己加。'
   },
   {
-    icon: Wand2,
-    title: '跨论文套路归纳',
-    desc: '同类论文攒够以后，一键横向比对，生成「这类论文一般怎么写、怎么做实验」的手册。'
+    icon: Table2,
+    title: '实验对比与沉淀',
+    desc: '把同类论文的实验设置拉成一张表，本地算出平均几个数据集、几篇报告了方差、开源闭源比例。'
   }
 ]
 
@@ -47,7 +47,7 @@ export function Onboarding(): JSX.Element {
           <h1 className="font-serif text-[28px] font-semibold leading-snug text-ink-high">
             别再让读过的论文白白溜走
           </h1>
-          <p className="mt-3 max-w-xl text-[13.5px] leading-relaxed text-ink-mid">
+          <p className="mt-3 max-w-xl text-body leading-relaxed text-ink-mid">
             PaperVault 是一个本地优先的论文阅读知识库。它不只是存档，而是逼你把每篇论文
             <span className="text-ink-high">「学到了什么」</span>、
             <span className="text-ink-high">「它怎么写」</span>、
@@ -63,20 +63,20 @@ export function Onboarding(): JSX.Element {
               <div key={f.title} className="rounded-xl border border-line bg-bg-raised p-4">
                 <div className="mb-2 flex items-center gap-2">
                   <Icon className="h-4 w-4 text-brand-soft" />
-                  <span className="text-[12.5px] font-medium text-ink-high">{f.title}</span>
+                  <span className="text-ui font-medium text-ink-high">{f.title}</span>
                 </div>
-                <p className="text-[11.5px] leading-relaxed text-ink-low">{f.desc}</p>
+                <p className="text-meta leading-relaxed text-ink-low">{f.desc}</p>
               </div>
             )
           })}
         </div>
 
         <div className="rounded-xl border border-line bg-bg-raised p-4">
-          <div className="flex items-center gap-2 text-[12.5px] text-ink-high">
+          <div className="flex items-center gap-2 text-ui text-ink-high">
             <FolderOpen className="h-4 w-4 text-brand-soft" />
             先选一个目录作为知识库
           </div>
-          <p className="mt-1.5 text-[11.5px] leading-relaxed text-ink-low">
+          <p className="mt-1.5 text-meta leading-relaxed text-ink-low">
             随便新建一个空文件夹即可，例如 <code className="font-mono">~/Documents/PaperVault</code>
             。论文会以 Markdown 存在 <code className="font-mono">papers/</code> 下，附件放在{' '}
             <code className="font-mono">.papervault/</code> 下，整个目录可以直接 Git 管理。
@@ -90,9 +90,7 @@ export function Onboarding(): JSX.Element {
             >
               选择知识库目录
             </Button>
-            <span className="text-[11px] text-ink-low">
-              所有内容只保存在本地，不上传任何服务器
-            </span>
+            <span className="text-meta text-ink-low">所有内容只保存在本地，不上传任何服务器</span>
           </div>
         </div>
       </div>

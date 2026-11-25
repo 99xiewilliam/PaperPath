@@ -105,7 +105,14 @@ export function extractPhraseCandidates(
         const label = labelMatch[1].trim()
         const inline = labelMatch[2]?.trim() ?? ''
         collecting = PHRASE_LABELS.test(label) ? label : null
-        if (collecting && inline) push(inline, sectionKey, collecting, isWriting ? 'writing' : 'excerpt')
+        /*
+         * 标签后面紧跟的括号是**填写说明**（`- **可复用句式**（最多 3 条）：`），
+         * 不是句式本体。不收它，否则每篇笔记都会往句式库里塞一条
+         * 「（最多 3 条：英文原句 + 用在哪）：」这种垃圾。
+         * 引号里的原句不受影响：下面那轮引号扫描是扫整节的。
+         */
+        const isHint = /^[（(]/.test(inline)
+        if (collecting && inline && !isHint) push(inline, sectionKey, collecting, isWriting ? 'writing' : 'excerpt')
         continue
       }
       if (collecting) {
@@ -194,13 +201,46 @@ export function buildPhraseBank(papers: PhrasePaperInput[]): PhraseEntry[] {
   return entries
 }
 
-/** 句式所属的功能分组，用于句式库的左侧导航 */
-export function phraseGroupOf(entry: PhraseCandidate): string {
-  if (entry.source === 'curated') return entry.label || '英语写作短语'
+/**
+ * 句式库左栏的分组顺序。
+ *
+ * 按写作章节排而不是按字母：用户打开句式库时通常正卡在「Introduction 开头
+ * 那句话该怎么说」，而不是先想「我要表达的是 Gap 还是转折」——
+ * 分组要跟着写作时的搜索路径走。
+ */
+export const PHRASE_BANK_GROUP_ORDER = [
+  'Abstract',
+  'Introduction',
+  'Related Work',
+  'Methodology',
+  'Experiments',
+  'Limitations',
+  '原文摘录'
+]
+
+/**
+ * 一条句式落在句式库的哪个分组。
+ *
+ * 口径与「抽取位置」对齐：AI 精炼的短语归到「英语写作短语」，原文摘录归到
+ * 「原文摘录」，其余按写作章节（去掉「写作手法 · 」前缀）。
+ * 刻意不按 `label`（指出 Gap / 强调贡献 这类功能分类）分：一个功能分类下
+ * 往往横跨三四节，分组会碎成几十个，找不到东西。
+ */
+export function phraseBankGroupOf(entry: PhraseCandidate): string {
   if (entry.source === 'excerpt') return '原文摘录'
   return sectionFamily(entry.section)
 }
 
-export function phraseSections(entries: PhraseCandidate[]): string[] {
-  return [...new Set(entries.map(phraseGroupOf))]
+/** 分组 + 条数，按 `PHRASE_BANK_GROUP_ORDER` 排；未上榜的排后面、按条数降序 */
+export function phraseBankGroups(entries: PhraseCandidate[]): [string, number][] {
+  const counts = new Map<string, number>()
+  for (const entry of entries) {
+    const group = phraseBankGroupOf(entry)
+    counts.set(group, (counts.get(group) ?? 0) + 1)
+  }
+  return [...counts.entries()].sort((a, b) => {
+    const ia = PHRASE_BANK_GROUP_ORDER.indexOf(a[0])
+    const ib = PHRASE_BANK_GROUP_ORDER.indexOf(b[0])
+    return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib) || b[1] - a[1]
+  })
 }

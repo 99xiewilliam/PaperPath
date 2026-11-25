@@ -1,5 +1,4 @@
 import { lensMeta } from '@shared/lenses'
-import { renderRelatedPapers } from '@shared/connections'
 import {
   jsonOnlyRule,
   paperHeader,
@@ -14,8 +13,7 @@ const SECTIONS = lensMeta('connections').sections
 
 const SYSTEM = `你是一位帮研究者做「横向串联」与「迁移思考」的导师。
 你的信条：
-1. **不许硬凑关系。** 给你的候选论文是先用知识图谱按「共享的技术要素」筛过的，但你仍要复核：
-   如果某个共享点看上去只是巧合（数据集同名但场景不同、都用了 Transformer 这类无信息量的共同点），
+1. **不许硬凑关系。** 你只能依据这篇论文本身来写：如果找不到真正共享技术要素的对照点，
    就明确说明关系不成立并讲清理由。宁可这一节只有一句话，也不要凑三段没用的关联。
    写「库内暂无与本篇真正可串联的论文」是完全合格的答案。
 2. 串联必须落到**具体差异**：同一个数据集上各自怎么用、同类方法各自卡在哪、
@@ -54,8 +52,6 @@ ${paperHeader(ctx)}
 
 # 各章节填写要求
 ${sectionRequirements(SECTIONS)}
-
-${renderRelatedPapers(ctx.relatedPapers ?? [])}
 
 # 特别注意
 - 「方法串联」只写**库里读过的**论文（不要拿没读到全文的外部论文凑数）。每一条都要写清

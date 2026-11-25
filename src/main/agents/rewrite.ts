@@ -9,6 +9,7 @@
 import { sectionSpec } from '@shared/template'
 import type { LlmSettings } from '@shared/types'
 import { chatCompletion } from '../llm'
+import { sectionRulesFor } from '../lenses/writing'
 
 export const REWRITE_FORMAT_OVERRIDE = `# 本次任务的输出格式（覆盖上文所有关于 JSON 的要求）
 你这次的任务是**重写单个章节的正文**，不是做结构化抽取。
@@ -78,13 +79,23 @@ export function buildSectionRewritePrompt(
   extraInstruction?: string
 ): string {
   const spec = sectionSpec(sectionKey)
+  // 与精读同源的「本节特有角度」（贡献段逐条拆 / 条目边界这类）；
+  // 非写作章节没有专属规则，这里自然为空。
+  const rules = sectionRulesFor(sectionKey)
   return `# 任务
 针对论文《${paperTitle}》，重写笔记中的「${sectionKey}」章节。
 
 # 该章节的填写要求
 ${spec?.hint ?? ''}
 建议结构：
-${spec?.scaffold ?? ''}
+${spec?.scaffold ?? ''}${
+    rules.length
+      ? `
+
+# 本节的特别注意
+${rules.join('\n')}`
+      : ''
+  }
 
 # 当前内容（可能不完整或有误）
 ${currentContent || '（空）'}

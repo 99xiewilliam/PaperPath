@@ -48,6 +48,7 @@ export const englishLens: Lens = {
   id: 'english',
   meta: lensMeta('english'),
   system: SYSTEM,
+  voice: false,
 
   prompt(ctx: LensContext): string {
     const existing = (ctx.existingPhrases ?? []).map((p) => p.text).filter(Boolean)
@@ -106,12 +107,20 @@ ${sourceBlock(ctx, ['Abstract', 'Introduction', 'Related Work', 'Method', 'Exper
       seen.add(key)
 
       const category = String(row.category ?? '').trim()
+      /*
+       * example / from 是可选的，没值时**键不能出现**：写成 `example: undefined`
+       * 会让 js-yaml 在落盘那一步抛 "unacceptable kind of an object to dump"，
+       * 而 frontmatter 是整篇一起序列化的 —— 一条没写例句的短语就足以让
+       * 这次精读的全部产出落不了盘（笔记停在空骨架）。
+       */
+      const example = String(row.example ?? '').trim()
+      const from = String(row.from ?? '').trim()
       phrases.push({
         category: validCategories.has(category) ? category : '其他',
         text,
         usage: String(row.usage ?? '').trim(),
-        example: String(row.example ?? '').trim() || undefined,
-        from: String(row.from ?? '').trim() || undefined
+        ...(example ? { example } : {}),
+        ...(from ? { from } : {})
       })
       if (phrases.length >= 24) break
     }

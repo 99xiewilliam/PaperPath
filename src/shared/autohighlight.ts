@@ -141,19 +141,32 @@ function stripHeadingTitle(title: string): string {
  */
 const SKIP_HEADING =
   /\b(references?|bibliography|acknowledg\w*|appendix|appendices|supplementary|supplement|author contributions?|funding|financial|conflicts? of interest|declarations?|ethics?|reproducibility statement)\b/
+/**
+ * 跳过项里也有该留下的：附录 / 补充材料里的**实现细节、超参、数据集统计、复现声明**，
+ * 恰恰是实验设置的主要藏身处（正文只写一句「详见附录 A」）。
+ *
+ * 少了这一条，模型永远标不到「用了什么硬件、什么超参、数据多少条」——
+ * 而那些正是复现一篇论文时最需要、初学者也最容易跳过的信息。
+ *
+ * 只认**带限定词**的标题：「Appendix A Proofs」仍然跳过（证明过程不是实验设置），
+ * 「Appendix B Implementation Details」「C Hyperparameters」则归给实验专家。
+ */
+const SKIP_BUT_KEEP =
+  /\b(implementation|details?|hyper-?parameters?|setup|settings?|datasets?|data statistics|training|experimental|reproducib\w*)\b/
 const PROBLEM_KEYWORDS =
   /\b(abstract|introduction|motivation|background|related works?|problem|overview|objective)\b/
 const METHOD_KEYWORDS =
   /\b(method\w*|approach|model\w*|framework|architecture|algorithm\w*|design|formulation|training|inference|preliminar\w*|notation|our|proposed)\b/
 const EXPERIMENT_KEYWORDS =
-  /\b(experiment\w*|evaluation|results?|analysis|ablation\w*|benchmark\w*|setup|settings?|datasets?|empirical|comparison|metrics?|studies|study)\b/
+  /\b(experiment\w*|evaluation|results?|analysis|ablation\w*|benchmark\w*|setup|settings?|datasets?|empirical|comparison|metrics?|studies|study|implementation|hyper-?parameters?|data statistics|training details?)\b/
 const CONCLUSION_KEYWORDS =
   /\b(conclusion\w*|discussion|limitations?|future works?|summary|concluding|takeaways?|implications?|impact)\b/
 
 /**
  * 把标题序列归类到 4 个专家（或跳过）。
  *
- * - 命中跳过词（参考文献 / 致谢 / 附录容器…）的不喂给任何专家；
+ * - 命中跳过词（参考文献 / 致谢 / 附录容器…）的不喂给任何专家，
+ *   **但附录里的实现细节 / 超参 / 数据集统计除外**（见 SKIP_BUT_KEEP）；
  * - 命不中任何关键词时：带 N.M / A.3 编号的子标题**继承上一个标题的类别**
  *   （「3.2 Loss Function」跟「3 Method」走），上一个是跳过项则它也跳过
  *   （「Appendix」下的「A.2 Proofs」不该喂给任何人）；
@@ -163,8 +176,9 @@ export function classifyHeadings(titles: string[]): Array<AgentKind | 'skip'> {
   const kinds: Array<AgentKind | 'skip'> = []
   for (let i = 0; i < titles.length; i++) {
     const stripped = stripHeadingTitle(titles[i])
-    if (SKIP_HEADING.test(stripped)) kinds.push('skip')
-    else if (PROBLEM_KEYWORDS.test(stripped)) kinds.push('problem')
+    if (SKIP_HEADING.test(stripped)) {
+      kinds.push(SKIP_BUT_KEEP.test(stripped) ? 'experiment' : 'skip')
+    } else if (PROBLEM_KEYWORDS.test(stripped)) kinds.push('problem')
     else if (METHOD_KEYWORDS.test(stripped)) kinds.push('method')
     else if (EXPERIMENT_KEYWORDS.test(stripped)) kinds.push('experiment')
     else if (CONCLUSION_KEYWORDS.test(stripped)) kinds.push('conclusion')

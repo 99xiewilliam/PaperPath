@@ -17,6 +17,7 @@ import {
   Loader2,
   Maximize2,
   Moon,
+  PenLine,
   ScanText,
   Send,
   Bot,
@@ -46,7 +47,7 @@ import type { SourceLine } from '@shared/autohighlight'
 import type { PassageAskMode, PassageMode } from '@shared/api'
 import type { ChatMessage } from '@shared/types'
 import { cn, errorMessage } from '@/lib/utils'
-import { loadPdfjs } from '@/lib/pdf'
+import { loadPdfjs, openPdfDocument } from '@/lib/pdf'
 import { buildPositionedLines, type TextItemLike } from '@/lib/pdfText'
 import { useAppStore } from '@/store/useAppStore'
 import { Markdown } from './Markdown'
@@ -78,6 +79,8 @@ interface Props {
   onHighlightsChange: (next: Highlight[]) => void
   /** 把片段直接写进笔记草稿（PaperDetail 传入），返回落点章节；不给则只提供复制 */
   onInsertToNote?: (markdown: string) => string
+  /** 打开后跳到这一页；at 变了才再跳一次（同一页连点两次也要生效） */
+  jumpTo?: { page: number; at: number } | null
 }
 
 interface SelectionInfo {
@@ -122,10 +125,15 @@ const CONT_PAD = 16
 /** 判定「当前页」的锚点：视口顶部往下 40% 处的那条水平线 */
 const ANCHOR_RATIO = 0.4
 
-const clamp = (value: number, lo: number, hi: number): number =>
-  Math.min(Math.max(value, lo), hi)
+const clamp = (value: number, lo: number, hi: number): number => Math.min(Math.max(value, lo), hi)
 
-export function PdfReader({ paperId, highlights, onHighlightsChange, onInsertToNote }: Props): JSX.Element {
+export function PdfReader({
+  paperId,
+  highlights,
+  onHighlightsChange,
+  onInsertToNote,
+  jumpTo
+}: Props): JSX.Element {
   const toast = useAppStore((s) => s.toast)
   const patchSettings = useAppStore((s) => s.patchSettings)
   // 阅读器深色模式：偏好存在设置里，跟着用户走
@@ -169,6 +177,8 @@ export function PdfReader({ paperId, highlights, onHighlightsChange, onInsertToN
   const [aiBusy, setAiBusy] = useState<PassageAskMode | null>(null)
   const [showList, setShowList] = useState(false)
   const [color, setColor] = useState(DEFAULT_HIGHLIGHT_COLOR)
+  /** 正在写「我的想法」的那条高亮 */
+  const [noteEditing, setNoteEditing] = useState<{ id: string; text: string } | null>(null)
   /** 「AI 标重点」正在跑（一次全文调用，几十秒量级） */
   const [aiMarking, setAiMarking] = useState(false)
   /**
@@ -181,7 +191,10 @@ export function PdfReader({ paperId, highlights, onHighlightsChange, onInsertToN
   /** 抓手模式：按住左键平移页面（放大后比反复滚动更好对准位置） */
   const [panMode, setPanMode] = useState(false)
   /** 正在拖出来的框（归一化坐标 + 所在页），松手后清空 */
-  const [captureBox, setCaptureBox] = useState<{ page: number; rect: HighlightRect } | null>(null)
+  const [captureBox, setCaptureBox] = useState<{
+    page: number
+    rect: HighlightRect
+  } | null>(null)
   const [capturing, setCapturing] = useState(false)
   /**
    * 刚截好的图。
@@ -250,18 +263,20 @@ export function PdfReader({ paperId, highlights, onHighlightsChange, onInsertToN
 
     void (async () => {
       try {
-        const res = await window.papervault.papers.pdfData(paperId)
+        /*
+         * 文档由 lib/pdf 缓存，**卸载时不销毁**。
+         *
+         * 阅读器只在「原文」tab 挂载，而「AI 标重点」要先逐页提取带坐标的文字行
+         * （三十页的论文要好几秒到几十秒）。用户等待时切到别的 tab，组件一卸载
+         * 就把文档销毁，正在跑的提取当场失败 —— 表现成「AI 提取重点中途停止」。
+         * 文档属于这篇论文，不属于某个 tab，见 lib/pdf.ts 的 openPdfDocument。
+         */
+        const loaded = await openPdfDocument(paperId, async (id) => {
+          const res = await window.papervault.papers.pdfData(id)
+          if (!res.ok || !res.data) throw new Error(res.message ?? '读取 PDF 失败')
+          return res.data
+        })
         if (cancelled) return
-        if (!res.ok || !res.data) throw new Error(res.message ?? '读取 PDF 失败')
-
-        const pdfjsLib = await loadPdfjs()
-        // slice() 是因为 pdfjs 会接管（可能 detach）传入的 buffer
-        const task = pdfjsLib.getDocument({ data: res.data.slice() })
-        const loaded = await task.promise
-        if (cancelled) {
-          void loaded.destroy()
-          return
-        }
         setDoc(loaded)
         setPageCount(loaded.numPages)
       } catch (err) {
@@ -276,12 +291,14 @@ export function PdfReader({ paperId, highlights, onHighlightsChange, onInsertToN
     }
   }, [paperId])
 
-  // 换文档时销毁上一份，否则 pdfjs 的 worker 和缓存会一直累积
-  useEffect(() => {
-    return () => {
-      void doc?.destroy()
-    }
-  }, [doc])
+  /*
+   * 这里原本是「卸载时 destroy(doc)」，注释写的意图是「换文档时销毁上一份」——
+   * 但 effect 的 cleanup 在**组件卸载**时同样会跑，于是切个 tab 就把文档销毁了，
+   * 正在进行的文字提取连带失败。
+   *
+   * 现在文档的生命周期交给 lib/pdf.ts 的缓存：换论文时自动释放上一份，
+   * 卸载不再动它，所以「切走再切回来」也不会重新加载一遍（顺带快了不少）。
+   */
 
   /* ---------------- 阅读位置（上次读到哪） ---------------- */
 
@@ -457,6 +474,14 @@ export function PdfReader({ paperId, highlights, onHighlightsChange, onInsertToN
     [offsets, updateFromScroll]
   )
 
+  // 版面尺寸算好之前跳不了，所以要等 offsets 就绪；缩放也会改 offsets，靠 at 去重避免反复跳
+  const jumpedAt = useRef<number | null>(null)
+  useEffect(() => {
+    if (!jumpTo || !offsets.length || jumpedAt.current === jumpTo.at) return
+    jumpedAt.current = jumpTo.at
+    scrollToPage(jumpTo.page)
+  }, [jumpTo, offsets.length, scrollToPage])
+
   /**
    * 缩放前记下「哪一点要钉在原地」，缩放后接回去，不跳页。
    *
@@ -623,7 +648,10 @@ export function PdfReader({ paperId, highlights, onHighlightsChange, onInsertToN
       const anchorViewX = hasPos ? event.clientX - rect.left : undefined
       zoomRef.current(clamp(raw, 1 - PINCH_STEP_CAP, 1 + PINCH_STEP_CAP), anchorViewX, anchorViewY)
     }
-    window.addEventListener('wheel', onWheel, { capture: true, passive: false })
+    window.addEventListener('wheel', onWheel, {
+      capture: true,
+      passive: false
+    })
     return () => window.removeEventListener('wheel', onWheel, { capture: true })
   }, [])
 
@@ -826,7 +854,11 @@ export function PdfReader({ paperId, highlights, onHighlightsChange, onInsertToN
         const res = await window.papervault.figures.save(paperId, bytes, '.png')
         if (!res.ok || !res.relPath || !res.markdown) throw new Error(res.message ?? '保存失败')
 
-        setShot({ url: URL.createObjectURL(blob), markdown: res.markdown, relPath: res.relPath })
+        setShot({
+          url: URL.createObjectURL(blob),
+          markdown: res.markdown,
+          relPath: res.relPath
+        })
         // 截完就退出框选模式，不然下一次点击又是在画框
         setCaptureMode(false)
         // 图库面板开着的话同步刷新，新图立刻可见
@@ -951,25 +983,52 @@ export function PdfReader({ paperId, highlights, onHighlightsChange, onInsertToN
     return map
   }, [highlights])
 
-  const addHighlight = useCallback(async () => {
-    if (!selection) return
-    const highlight: Highlight = {
-      id: newHighlightId(),
-      page: selection.page,
-      text: selection.text,
-      rects: selection.rects,
-      color,
-      createdAt: new Date().toISOString()
-    }
-    const res = await window.papervault.papers.saveHighlight(paperId, highlight)
-    if (!res.ok) {
-      toast(res.message ?? '保存高亮失败', 'error')
-      return
-    }
-    onHighlightsChange(res.highlights ?? [])
-    window.getSelection()?.removeAllRanges()
-    setSelection(null)
-  }, [selection, color, paperId, onHighlightsChange, toast])
+  const addHighlight = useCallback(
+    async (withNote = false) => {
+      if (!selection) return
+      const highlight: Highlight = {
+        id: newHighlightId(),
+        page: selection.page,
+        text: selection.text,
+        rects: selection.rects,
+        color,
+        createdAt: new Date().toISOString()
+      }
+      const res = await window.papervault.papers.saveHighlight(paperId, highlight)
+      if (!res.ok) {
+        toast(res.message ?? '保存高亮失败', 'error')
+        return
+      }
+      onHighlightsChange(res.highlights ?? [])
+      window.getSelection()?.removeAllRanges()
+      setSelection(null)
+      if (withNote) {
+        setShowList(true)
+        setNoteEditing({ id: highlight.id, text: '' })
+      }
+    },
+    [selection, color, paperId, onHighlightsChange, toast]
+  )
+
+  const saveNote = useCallback(
+    async (h: Highlight, text: string) => {
+      setNoteEditing(null)
+      const note = text.trim()
+      if (note === (h.note ?? '')) return
+      // 空备注就不带这个键：frontmatter 落盘时 undefined 会让 js-yaml 直接抛错
+      const { note: _old, ...rest } = h
+      const res = await window.papervault.papers.saveHighlight(
+        paperId,
+        note ? { ...rest, note } : rest
+      )
+      if (!res.ok) {
+        toast(res.message ?? '保存想法失败', 'error')
+        return
+      }
+      onHighlightsChange(res.highlights ?? [])
+    },
+    [paperId, onHighlightsChange, toast]
+  )
 
   const removeHighlight = useCallback(
     async (id: string) => {
@@ -1059,7 +1118,10 @@ export function PdfReader({ paperId, highlights, onHighlightsChange, onInsertToN
         const last = messages[messages.length - 1]
         // 增量只会追加到最后一条 assistant 消息上
         if (!last || last.role !== 'assistant') return prev
-        messages[messages.length - 1] = { ...last, content: last.content + delta }
+        messages[messages.length - 1] = {
+          ...last,
+          content: last.content + delta
+        }
         return { ...prev, messages }
       })
     })
@@ -1106,7 +1168,11 @@ export function PdfReader({ paperId, highlights, onHighlightsChange, onInsertToN
         // 用完整结果收尾：万一有增量在订阅生效前就发出去了，这里兜底
         setChat((prev) =>
           prev
-            ? { ...prev, streaming: false, messages: [{ role: 'assistant', content: res.content }] }
+            ? {
+                ...prev,
+                streaming: false,
+                messages: [{ role: 'assistant', content: res.content }]
+              }
             : prev
         )
       } catch (err) {
@@ -1158,14 +1224,23 @@ export function PdfReader({ paperId, highlights, onHighlightsChange, onInsertToN
         toast(res.message ?? '追问失败', 'error')
         // 失败就把占位的空消息去掉，别留个空气泡
         setChat((prev) =>
-          prev ? { ...prev, streaming: false, messages: prev.messages.slice(0, -1) } : prev
+          prev
+            ? {
+                ...prev,
+                streaming: false,
+                messages: prev.messages.slice(0, -1)
+              }
+            : prev
         )
         return
       }
       setChat((prev) => {
         if (!prev) return prev
         const messages = [...prev.messages]
-        messages[messages.length - 1] = { role: 'assistant', content: res.content }
+        messages[messages.length - 1] = {
+          role: 'assistant',
+          content: res.content
+        }
         return { ...prev, streaming: false, messages }
       })
     } catch (err) {
@@ -1227,7 +1302,7 @@ export function PdfReader({ paperId, highlights, onHighlightsChange, onInsertToN
       <div className="flex h-full items-center justify-center px-8">
         <div className="max-w-md text-center">
           <ScanText className="mx-auto mb-2 h-7 w-7 text-ink-low" />
-          <p className="text-[12.5px] text-ink-mid">{error}</p>
+          <p className="text-ui text-ink-mid">{error}</p>
         </div>
       </div>
     )
@@ -1235,7 +1310,7 @@ export function PdfReader({ paperId, highlights, onHighlightsChange, onInsertToN
 
   if (loading || !doc || !pageSizes) {
     return (
-      <div className="flex h-full items-center justify-center gap-2 text-[12px] text-ink-low">
+      <div className="flex h-full items-center justify-center gap-2 text-ui text-ink-low">
         <Loader2 className="h-4 w-4 animate-spin text-brand-soft" />
         正在解析 PDF…
       </div>
@@ -1254,7 +1329,7 @@ export function PdfReader({ paperId, highlights, onHighlightsChange, onInsertToN
         <button
           title="滚动到这一页"
           onClick={() => scrollToPage(h.page)}
-          className="rounded px-1 py-0.5 font-mono text-[9.5px] text-info transition hover:bg-white/5"
+          className="rounded px-1 py-0.5 font-mono text-tiny text-info transition hover:bg-white/5"
           style={{ background: 'rgba(116,172,143,0.14)' }}
         >
           P{h.page}
@@ -1264,17 +1339,52 @@ export function PdfReader({ paperId, highlights, onHighlightsChange, onInsertToN
         ) : (
           <span className="h-2.5 w-2.5 rounded-full" style={{ background: h.color }} />
         )}
+        {!h.ai && !h.note && noteEditing?.id !== h.id ? (
+          <button
+            title="写一句自己的想法"
+            onClick={() => setNoteEditing({ id: h.id, text: '' })}
+            className="ml-auto rounded p-0.5 text-ink-low opacity-0 transition group-hover:opacity-100 hover:text-brand-mist"
+          >
+            <PenLine className="h-3 w-3" />
+          </button>
+        ) : null}
         <button
           title="删除这条高亮"
           onClick={() => void removeHighlight(h.id)}
-          className="ml-auto rounded p-0.5 text-ink-low opacity-0 transition group-hover:opacity-100 hover:text-danger"
+          className={cn(
+            'rounded p-0.5 text-ink-low opacity-0 transition group-hover:opacity-100 hover:text-danger',
+            (h.ai || h.note || noteEditing?.id === h.id) && 'ml-auto'
+          )}
         >
           <Trash2 className="h-3 w-3" />
         </button>
       </div>
-      <p className="mt-1 line-clamp-3 text-[11px] leading-snug text-ink-mid">{h.text}</p>
+      <p className="mt-1 line-clamp-3 text-meta leading-snug text-ink-mid">{h.text}</p>
       {h.ai && h.note ? (
-        <p className="mt-1 text-[10.5px] leading-snug text-info/90">{h.note}</p>
+        <p className="mt-1 text-caption leading-snug text-info/90">{h.note}</p>
+      ) : null}
+      {!h.ai && noteEditing?.id === h.id ? (
+        <textarea
+          autoFocus
+          value={noteEditing.text}
+          onChange={(e) => setNoteEditing({ id: h.id, text: e.target.value })}
+          onBlur={() => void saveNote(h, noteEditing.text)}
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') setNoteEditing(null)
+            if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) e.currentTarget.blur()
+          }}
+          rows={3}
+          placeholder="我的想法：为什么划这句、和我的课题有什么关系…（失焦保存，⌘↩ 也行）"
+          className="field mt-1.5 resize-y px-2 py-1.5 text-meta"
+        />
+      ) : !h.ai && h.note ? (
+        <button
+          title="点击修改"
+          onClick={() => setNoteEditing({ id: h.id, text: h.note ?? '' })}
+          className="mt-1.5 block w-full border-l-2 border-brand-soft/60 pl-2 text-left text-meta leading-snug text-ink-high transition hover:border-brand-soft"
+        >
+          {h.note}
+        </button>
       ) : null}
     </div>
   )
@@ -1296,7 +1406,7 @@ export function PdfReader({ paperId, highlights, onHighlightsChange, onInsertToN
           <ToolButton title="上一页" disabled={page <= 1} onClick={() => scrollToPage(page - 1)}>
             <ChevronLeft className="h-3.5 w-3.5" />
           </ToolButton>
-          <span className="min-w-[54px] text-center text-[11.5px] tabular-nums text-ink-mid">
+          <span className="min-w-[54px] text-center text-meta tabular-nums text-ink-mid">
             {page} / {pageCount}
           </span>
           <ToolButton
@@ -1312,7 +1422,7 @@ export function PdfReader({ paperId, highlights, onHighlightsChange, onInsertToN
           <ToolButton title="缩小" disabled={scale <= MIN_SCALE} onClick={() => zoomBy(-0.15)}>
             <ZoomOut className="h-3.5 w-3.5" />
           </ToolButton>
-          <span className="min-w-[42px] text-center text-[11.5px] tabular-nums text-ink-mid">
+          <span className="min-w-[42px] text-center text-meta tabular-nums text-ink-mid">
             {Math.round(scale * 100)}%
           </span>
           <ToolButton title="放大" disabled={scale >= MAX_SCALE} onClick={() => zoomBy(0.15)}>
@@ -1322,7 +1432,7 @@ export function PdfReader({ paperId, highlights, onHighlightsChange, onInsertToN
 
         <button
           onClick={fitWidth}
-          className="flex items-center gap-1 rounded-lg border border-line px-2 py-1 text-[11px] text-ink-mid transition hover:border-strong hover:text-ink-high"
+          className="flex items-center gap-1 rounded-lg border border-line px-2 py-1 text-meta text-ink-mid transition hover:border-strong hover:text-ink-high"
         >
           <Maximize2 className="h-3 w-3" />
           适应宽度
@@ -1331,7 +1441,7 @@ export function PdfReader({ paperId, highlights, onHighlightsChange, onInsertToN
         <button
           title="按高度适应：一屏正好一整页，适合先通读结构"
           onClick={fitPage}
-          className="flex items-center gap-1 rounded-lg border border-line px-2 py-1 text-[11px] text-ink-mid transition hover:border-strong hover:text-ink-high"
+          className="flex items-center gap-1 rounded-lg border border-line px-2 py-1 text-meta text-ink-mid transition hover:border-strong hover:text-ink-high"
         >
           <Frame className="h-3 w-3" />
           整页
@@ -1341,7 +1451,7 @@ export function PdfReader({ paperId, highlights, onHighlightsChange, onInsertToN
           title={dark ? '切回浅色（原版面）' : '深色模式（反相显示，护眼）'}
           onClick={() => void patchSettings({ pdfDarkMode: !dark })}
           className={cn(
-            'flex items-center gap-1 rounded-lg border px-2 py-1 text-[11px] transition',
+            'flex items-center gap-1 rounded-lg border px-2 py-1 text-meta transition',
             dark
               ? 'border-brand/50 bg-brand/10 text-brand-mist'
               : 'border-line text-ink-mid hover:border-strong hover:text-ink-high'
@@ -1358,7 +1468,7 @@ export function PdfReader({ paperId, highlights, onHighlightsChange, onInsertToN
             setSelection(null)
           }}
           className={cn(
-            'flex items-center gap-1 rounded-lg border px-2 py-1 text-[11px] transition',
+            'flex items-center gap-1 rounded-lg border px-2 py-1 text-meta transition',
             captureMode
               ? 'border-brand/50 bg-brand/10 text-brand-mist'
               : 'border-line text-ink-mid hover:border-strong hover:text-ink-high'
@@ -1375,7 +1485,7 @@ export function PdfReader({ paperId, highlights, onHighlightsChange, onInsertToN
             setSelection(null)
           }}
           className={cn(
-            'flex items-center gap-1 rounded-lg border px-2 py-1 text-[11px] transition',
+            'flex items-center gap-1 rounded-lg border px-2 py-1 text-meta transition',
             panMode
               ? 'border-brand/50 bg-brand/10 text-brand-mist'
               : 'border-line text-ink-mid hover:border-strong hover:text-ink-high'
@@ -1390,17 +1500,13 @@ export function PdfReader({ paperId, highlights, onHighlightsChange, onInsertToN
           disabled={aiMarking}
           onClick={() => void runAutoMark()}
           className={cn(
-            'flex items-center gap-1 rounded-lg border px-2 py-1 text-[11px] transition',
+            'flex items-center gap-1 rounded-lg border px-2 py-1 text-meta transition',
             aiMarking || aiCount > 0
               ? 'border-info/50 bg-info/10 text-info'
               : 'border-line text-ink-mid hover:border-strong hover:text-ink-high'
           )}
         >
-          {aiMarking ? (
-            <Loader2 className="h-3 w-3 animate-spin" />
-          ) : (
-            <Bot className="h-3 w-3" />
-          )}
+          {aiMarking ? <Loader2 className="h-3 w-3 animate-spin" /> : <Bot className="h-3 w-3" />}
           {aiMarking ? '标注中…' : aiCount > 0 ? `AI 重点 ${aiCount}` : 'AI 标重点'}
         </button>
 
@@ -1408,13 +1514,13 @@ export function PdfReader({ paperId, highlights, onHighlightsChange, onInsertToN
           <button
             title={showAi ? '隐藏 AI 标出的重点（你自己划的不受影响）' : '显示 AI 标出的重点'}
             onClick={() => void patchSettings({ pdfShowAiHighlights: !showAi })}
-            className="flex items-center gap-1 rounded-lg border border-line px-2 py-1 text-[11px] text-ink-mid transition hover:border-strong hover:text-ink-high"
+            className="flex items-center gap-1 rounded-lg border border-line px-2 py-1 text-meta text-ink-mid transition hover:border-strong hover:text-ink-high"
           >
             {showAi ? <Eye className="h-3 w-3" /> : <EyeOff className="h-3 w-3" />}
           </button>
         ) : null}
 
-        <span className="ml-1 hidden text-[10.5px] text-ink-low sm:inline">
+        <span className="ml-1 hidden text-caption text-ink-low sm:inline">
           {captureMode ? (
             '在页面上拖出一个框 —— 图表、表格、公式都可以'
           ) : panMode ? (
@@ -1428,13 +1534,13 @@ export function PdfReader({ paperId, highlights, onHighlightsChange, onInsertToN
 
         <div className="ml-auto flex items-center gap-1.5">
           {pendingPages.size > 0 ? (
-            <span className="text-[10.5px] text-ink-low">渲染中…</span>
+            <span className="text-caption text-ink-low">渲染中…</span>
           ) : null}
           <button
             onClick={toggleLibrary}
             title="这篇论文截过的全部图"
             className={cn(
-              'flex items-center gap-1 rounded-lg border px-2 py-1 text-[11px] transition',
+              'flex items-center gap-1 rounded-lg border px-2 py-1 text-meta transition',
               showLibrary
                 ? 'border-brand/50 bg-brand/10 text-brand-mist'
                 : 'border-line text-ink-mid hover:border-strong hover:text-ink-high'
@@ -1446,7 +1552,7 @@ export function PdfReader({ paperId, highlights, onHighlightsChange, onInsertToN
           <button
             onClick={() => setShowList((v) => !v)}
             className={cn(
-              'flex items-center gap-1 rounded-lg border px-2 py-1 text-[11px] transition',
+              'flex items-center gap-1 rounded-lg border px-2 py-1 text-meta transition',
               showList
                 ? 'border-brand/50 bg-brand/10 text-brand-mist'
                 : 'border-line text-ink-mid hover:border-strong hover:text-ink-high'
@@ -1470,12 +1576,12 @@ export function PdfReader({ paperId, highlights, onHighlightsChange, onInsertToN
             className="max-h-[110px] max-w-[200px] rounded-lg border border-line bg-white object-contain"
           />
           <div className="min-w-0 flex-1">
-            <p className="text-[11.5px] text-ink-high">已存进知识库：{shot.relPath}</p>
-            <p className="mt-1 text-[10.5px] leading-relaxed text-ink-low">
+            <p className="text-meta text-ink-high">已存进知识库：{shot.relPath}</p>
+            <p className="mt-1 text-caption leading-relaxed text-ink-low">
               「插入笔记」写进你上次在笔记里放光标的位置，连截几张会依次往下排；也可以复制后自己贴。
               路径相对笔记存放，知识库整个搬走也不会断。
             </p>
-            <code className="mt-1.5 block truncate rounded-md bg-black/30 px-2 py-1 font-mono text-[10.5px] text-accent-soft">
+            <code className="mt-1.5 block truncate rounded-md bg-black/30 px-2 py-1 font-mono text-caption text-accent-soft">
               {shot.markdown}
             </code>
           </div>
@@ -1488,20 +1594,20 @@ export function PdfReader({ paperId, highlights, onHighlightsChange, onInsertToN
                     : '写进笔记草稿：优先落在你上次放光标的位置，没有就追加到最近编辑的章节'
                 }
                 onClick={insertShot}
-                className="rounded-md border border-brand/40 bg-brand/10 px-2 py-0.5 text-[10.5px] text-brand-mist transition hover:bg-brand/20"
+                className="rounded-md border border-brand/40 bg-brand/10 px-2 py-0.5 text-caption text-brand-mist transition hover:bg-brand/20"
               >
                 {shot.insertedTo ? `已插入「${shot.insertedTo}」` : '插入笔记'}
               </button>
             ) : null}
             <button
               onClick={() => void copyText(shot.markdown, '图表 Markdown')}
-              className="rounded-md border border-line px-2 py-0.5 text-[10.5px] text-ink-mid transition hover:border-strong hover:text-ink-high"
+              className="rounded-md border border-line px-2 py-0.5 text-caption text-ink-mid transition hover:border-strong hover:text-ink-high"
             >
               复制
             </button>
             <button
               onClick={closeShot}
-              className="rounded-md border border-line px-2 py-0.5 text-[10.5px] text-ink-low transition hover:border-strong hover:text-ink-mid"
+              className="rounded-md border border-line px-2 py-0.5 text-caption text-ink-low transition hover:border-strong hover:text-ink-mid"
             >
               关闭
             </button>
@@ -1575,7 +1681,7 @@ export function PdfReader({ paperId, highlights, onHighlightsChange, onInsertToN
                     />
                   ) : (
                     // 占位框：尺寸和真页一致，滚动条才不会骗人；页码方便快速滚动时对位置
-                    <div className="flex h-full w-full select-none items-center justify-center text-[11px] text-black/15">
+                    <div className="flex h-full w-full select-none items-center justify-center text-meta text-black/15">
                       第 {n} 页
                     </div>
                   )}
@@ -1585,9 +1691,7 @@ export function PdfReader({ paperId, highlights, onHighlightsChange, onInsertToN
                     AI 标重点用「浅底 + 虚线下划线」和用户高亮的纯色块区分开 ——
                     它是导航建议，不是用户自己的标记，视觉上要退后半步。
                   */}
-                  <div
-                    className={cn('pointer-events-none absolute inset-0', dark && 'pdf-invert')}
-                  >
+                  <div className={cn('pointer-events-none absolute inset-0', dark && 'pdf-invert')}>
                     {(highlightsByPage.get(n) ?? []).flatMap((h) => {
                       if (h.ai && !showAi) return []
                       return h.rects.map((r, ri) => (
@@ -1601,7 +1705,11 @@ export function PdfReader({ paperId, highlights, onHighlightsChange, onInsertToN
                             height: `${r.h * 100}%`,
                             background: h.color,
                             mixBlendMode: 'multiply',
-                            ...(h.ai ? { borderBottom: '2px dashed rgba(127,163,199,0.9)' } : {})
+                            ...(h.ai
+                              ? {
+                                  borderBottom: '2px dashed rgba(127,163,199,0.9)'
+                                }
+                              : {})
                           }}
                         />
                       ))
@@ -1636,12 +1744,20 @@ export function PdfReader({ paperId, highlights, onHighlightsChange, onInsertToN
                   {selection && selection.page === n ? (
                     <div
                       className="pdf-float-card absolute z-20 flex -translate-x-1/2 items-center gap-0.5 rounded-lg p-1"
-                      style={{ left: selection.anchorX, top: Math.max(4, selection.anchorY - 42) }}
+                      style={{
+                        left: selection.anchorX,
+                        top: Math.max(4, selection.anchorY - 42)
+                      }}
                     >
                       <ActionButton
                         icon={<Highlighter className="h-3.5 w-3.5" />}
                         label="高亮"
                         onClick={() => void addHighlight()}
+                      />
+                      <ActionButton
+                        icon={<PenLine className="h-3.5 w-3.5" />}
+                        label="想法"
+                        onClick={() => void addHighlight(true)}
                       />
                       <ActionButton
                         icon={<Languages className="h-3.5 w-3.5" />}
@@ -1655,13 +1771,13 @@ export function PdfReader({ paperId, highlights, onHighlightsChange, onInsertToN
                         loading={aiBusy === 'explain'}
                         onClick={() => void askAi('explain')}
                       />
-                      <span className="mx-0.5 h-3.5 w-px bg-white/12" />
+                      <span className="mx-0.5 h-3.5 w-px bg-white/[0.12]" />
                       <ActionButton
                         icon={<Copy className="h-3.5 w-3.5" />}
                         label="复制"
                         onClick={() => void copyText(selection.text, '原文')}
                       />
-                      <span className="mx-0.5 h-3.5 w-px bg-white/12" />
+                      <span className="mx-0.5 h-3.5 w-px bg-white/[0.12]" />
                       {HIGHLIGHT_COLORS.map((c) => (
                         <button
                           key={c.id}
@@ -1690,14 +1806,14 @@ export function PdfReader({ paperId, highlights, onHighlightsChange, onInsertToN
                         className="flex shrink-0 cursor-move select-none items-center gap-1.5 border-b border-white/10 px-3 py-2"
                       >
                         <GripVertical className="h-3.5 w-3.5 shrink-0 text-ink-low" />
-                        <span className="text-[11px] font-medium text-brand-mist">选段对话</span>
+                        <span className="text-meta font-medium text-brand-mist">选段对话</span>
                         {chat.streaming ? (
-                          <span className="flex items-center gap-1 text-[10px] text-brand-mist/80">
+                          <span className="flex items-center gap-1 text-caption text-brand-mist/80">
                             <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-brand-soft" />
                             生成中
                           </span>
                         ) : (
-                          <span className="text-[10px] text-ink-low">请自行核对</span>
+                          <span className="text-caption text-ink-low">请自行核对</span>
                         )}
                         <button
                           title="复制最后一条回复"
@@ -1732,7 +1848,7 @@ export function PdfReader({ paperId, highlights, onHighlightsChange, onInsertToN
                           message.role === 'user' ? (
                             <div
                               key={index}
-                              className="mb-2 ml-8 rounded-lg bg-white/[0.07] px-2.5 py-1.5 text-[11.5px] leading-relaxed text-ink-high"
+                              className="mb-2 ml-8 rounded-lg bg-white/[0.07] px-2.5 py-1.5 text-meta leading-relaxed text-ink-high"
                             >
                               {message.content}
                             </div>
@@ -1740,10 +1856,10 @@ export function PdfReader({ paperId, highlights, onHighlightsChange, onInsertToN
                             <Markdown
                               key={index}
                               content={message.content}
-                              className="mb-2 text-[12px] leading-relaxed"
+                              className="mb-2 text-ui leading-relaxed"
                             />
                           ) : (
-                            <p key={index} className="mb-2 text-[11.5px] text-ink-low">
+                            <p key={index} className="mb-2 text-meta text-ink-low">
                               正在生成…
                             </p>
                           )
@@ -1762,7 +1878,7 @@ export function PdfReader({ paperId, highlights, onHighlightsChange, onInsertToN
                             }
                           }}
                           placeholder="继续追问这段…"
-                          className="min-w-0 flex-1 rounded-lg border border-white/12 bg-black/25 px-2.5 py-1.5 text-[11.5px] text-ink-high outline-none placeholder:text-ink-low focus:border-brand/50"
+                          className="min-w-0 flex-1 rounded-lg border border-white/[0.12] bg-black/25 px-2.5 py-1.5 text-meta text-ink-high outline-none placeholder:text-ink-low focus:border-brand/50"
                         />
                         <button
                           title="发送（Enter）"
@@ -1789,7 +1905,7 @@ export function PdfReader({ paperId, highlights, onHighlightsChange, onInsertToN
         {showLibrary ? (
           <div className="flex w-[260px] shrink-0 flex-col overflow-hidden rounded-xl border border-line bg-bg-raised">
             <div className="flex shrink-0 items-center justify-between border-b border-line px-3 py-2">
-              <span className="text-[11.5px] font-medium text-ink-high">
+              <span className="text-meta font-medium text-ink-high">
                 本篇图库 {library?.length ?? 0}
               </span>
               <button
@@ -1801,9 +1917,9 @@ export function PdfReader({ paperId, highlights, onHighlightsChange, onInsertToN
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto p-2">
               {library === null ? (
-                <p className="px-1 py-2 text-[11px] text-ink-low">读取中…</p>
+                <p className="px-1 py-2 text-meta text-ink-low">读取中…</p>
               ) : !library.length ? (
-                <p className="px-1 py-2 text-[11px] leading-relaxed text-ink-low">
+                <p className="px-1 py-2 text-meta leading-relaxed text-ink-low">
                   还没有截过图。点工具栏的「截取图表」，在页面上拖一个框即可。
                 </p>
               ) : (
@@ -1830,7 +1946,7 @@ export function PdfReader({ paperId, highlights, onHighlightsChange, onInsertToN
         {showList ? (
           <div className="flex w-[260px] shrink-0 flex-col overflow-hidden rounded-xl border border-line bg-bg-raised">
             <div className="flex shrink-0 items-center justify-between border-b border-line px-3 py-2">
-              <span className="text-[11.5px] font-medium text-ink-high">
+              <span className="text-meta font-medium text-ink-high">
                 全部高亮 {highlights.length}
               </span>
               <button
@@ -1842,15 +1958,15 @@ export function PdfReader({ paperId, highlights, onHighlightsChange, onInsertToN
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto p-2">
               {!highlights.length ? (
-                <p className="px-1 py-2 text-[11px] leading-relaxed text-ink-low">
-                  还没有高亮。在 PDF 里选中文字点「高亮」，或点工具栏的「AI 标重点」让
-                  AI 把这篇最不该跳过的句子标出来。
+                <p className="px-1 py-2 text-meta leading-relaxed text-ink-low">
+                  还没有高亮。在 PDF 里选中文字点「高亮」，或点工具栏的「AI 标重点」让 AI
+                  把这篇最不该跳过的句子标出来。
                 </p>
               ) : (
                 <div className="space-y-3">
                   {aiHighlights.length ? (
                     <div>
-                      <p className="mb-1.5 flex items-center gap-1 px-1 text-[10.5px] font-medium text-info">
+                      <p className="mb-1.5 flex items-center gap-1 px-1 text-caption font-medium text-info">
                         <Bot className="h-3 w-3" />
                         AI 重点 {aiHighlights.length}
                         <span className="font-normal text-ink-low">（为什么重要见每条下方）</span>
@@ -1860,7 +1976,7 @@ export function PdfReader({ paperId, highlights, onHighlightsChange, onInsertToN
                   ) : null}
                   {myHighlights.length ? (
                     <div>
-                      <p className="mb-1.5 px-1 text-[10.5px] font-medium text-ink-mid">
+                      <p className="mb-1.5 px-1 text-caption font-medium text-ink-mid">
                         我的高亮 {myHighlights.length}
                       </p>
                       <div className="space-y-1">{myHighlights.map(renderHighlightItem)}</div>
@@ -2022,7 +2138,7 @@ function ActionButton({
     <button
       onClick={onClick}
       disabled={loading}
-      className="flex items-center gap-1 rounded px-1.5 py-1 text-[11.5px] text-ink-mid transition hover:bg-white/[0.07] hover:text-ink-high disabled:opacity-60"
+      className="flex items-center gap-1 rounded px-1.5 py-1 text-meta text-ink-mid transition hover:bg-white/[0.07] hover:text-ink-high disabled:opacity-60"
     >
       {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : icon}
       {label}

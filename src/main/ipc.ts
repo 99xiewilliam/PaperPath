@@ -9,15 +9,13 @@
  *   runtime.ts        跨模块共享（进度广播 / 任务包装 / 知识库上下文 / 预算常量）
  *   vault-service.ts  打开、状态、重新扫描
  *   paper-service.ts  论文的读（sectionsOf）与写（persistPaper）
+ *   collection-service.ts 专题（手动分组的论文集合）
  *   pdf-window.ts     PDF 预览窗口与路径越界校验
  *   import-service.ts PDF 导入
  *   ai-service.ts     精读 / 重写 / 划词 / 问答 / 套路归纳
  */
 import { dialog, ipcMain, shell } from 'electron'
-import { existsSync, readFileSync, rmSync, writeFileSync } from 'fs'
-import matter from 'gray-matter'
-import { EMPTY_GRAPH_STATS } from '@shared/graph'
-import type { GraphData, GraphScope, MultiHopResult } from '@shared/graph'
+import { existsSync, readFileSync } from 'fs'
 import type { Highlight } from '@shared/highlights'
 import type { LensId } from '@shared/lenses'
 import { normalizeReadingPosition } from '@shared/pagination'
@@ -25,46 +23,62 @@ import type { SourceLine } from '@shared/autohighlight'
 import { buildPhraseBank } from '@shared/phrases'
 import type { PhraseEntry } from '@shared/phrases'
 import type { PassageAskMode } from '@shared/api'
+import { buildWritingOverview, type WritingOverview } from '@shared/writing-logic'
 import type {
   AiTaskResult,
   AppSettings,
   ArxivMeta,
   ChatMessage,
+  CollectionCreateInput,
+  CollectionUpdateInput,
   ImportPdfResult,
   LlmSettings,
   PaperBulkUpdate,
-  LinkDiscoveryResult,
   PaperCreateInput,
   PaperDetail,
   PaperSummary,
   PaperUpdateInput,
   ScanResult,
-  StatsOverview,
-  Synthesis,
-  SynthesisScopeInput
+  StatsOverview
 } from '@shared/types'
-import type { AiTextResult, BatchProfileResult, BulkResult, ImportPdfPayload } from '@shared/api'
+import type {
+  AiTextResult,
+  BatchProfileResult,
+  BulkResult,
+  ChatOptions,
+  ChatResult,
+  ChatScope,
+  ImportPdfPayload
+} from '@shared/api'
 import {
   runAutoHighlight,
   runBuildProfile,
   runBuildProfiles,
   runChat,
-  runComboAnalysis,
-
-  runIdeaSynthesis,
   runLenses,
-  runLinkDiscovery,
   runPassage,
-  runQuiz,
   runRewriteSection,
-  runSlideDeck,
-  runSummarize,
-  runSynthesize
+  runSummarize
 } from './ai-service'
+import {
+  addPapersToCollection,
+  createCollection,
+  deleteCollection,
+  getCollection,
+  listCollections,
+  removePapersFromCollection,
+  updateCollection
+} from './collection-service'
 import { fetchArxivMeta } from './arxiv'
+import { buildProblemMap, countProblemSources, getProblemMap } from './problem-service'
+import { deleteIdea, generateIdeas, listIdeas, updateIdea } from './idea-service'
+import { addReferenceToLibrary, extractReferences, getReferences } from './reference-service'
+import type { IdeaPatch, ResearchIdea } from '@shared/ideas'
+import { DEFAULT_READING_SKILL } from '@shared/reading-skill'
+import type { ProblemMap } from '@shared/problems'
+import type { ReferenceList } from '@shared/references'
 import * as db from './db'
 import { assertGranted, grantPaths } from './file-grants'
-import { graphSnapshot, multiHopPaths } from './graph'
 import { importPdf } from './import-service'
 import { testConnection } from './llm'
 import {
@@ -81,7 +95,7 @@ import {
 import { openPdfWindow, resolvePdfPath } from './pdf-window'
 import { focusedWindow, interactiveTask, queuedTask, requireVault } from './runtime'
 import { getSettings, setSettings } from './settings'
-import { tasks, type TaskState } from './tasks'
+import { cancelInteractive, tasks, type TaskState } from './tasks'
 import * as vault from './vault'
 import { loadVault, rescanVault, vaultStatus } from './vault-service'
 
@@ -348,37 +362,83 @@ export function registerIpc(): void {
       })
   )
 
-  ipcMain.handle('ai:chat', (_e, paperIds: string[], messages: ChatMessage[]) =>
-    queuedTask<AiTextResult>('知识库问答', () => runChat(paperIds, messages), { content: '' })
-  )
-
-  ipcMain.handle('ai:synthesize', (_e, input: SynthesisScopeInput) =>
-    queuedTask<AiTaskResult>('套路归纳', () => runSynthesize(input))
-  )
-
   /*
-   * 「组合分析」。渲染层只传「哪几篇 + 叫什么名字」：材料怎么拼、线索怎么算
-   * 全在主进程（shared/combo.ts）—— 界面不该有机会自己拼一份原料塞进来。
+   * 问答走交互通道：用户正等着看回答，不该排在一次几分钟的精读后面。
+   * streamId 同时当取消标识，「停止」只掐这一次问答。
    */
-  ipcMain.handle('ai:comboAnalyze', (_e, input: { paperIds: string[]; title?: string }) =>
-    queuedTask<AiTaskResult>('组合分析', () => runComboAnalysis(input))
+  ipcMain.handle(
+    'ai:chat',
+    (_e, paperIds: string[], messages: ChatMessage[], scope?: ChatScope, options?: ChatOptions) =>
+      interactiveTask<ChatResult>(
+        (signal) => runChat(paperIds, messages, scope, options ?? {}, signal),
+        { content: '' },
+        options?.streamId
+      )
+  )
+  ipcMain.handle('ai:cancelChat', (_e, streamId: string) => cancelInteractive(streamId) > 0)
+
+  /* 专题 ----------------------------------------------------------- */
+  ipcMain.handle('collection:list', () => (db.isOpen() ? listCollections() : []))
+  ipcMain.handle('collection:get', (_e, id: string) => getCollection(id))
+  ipcMain.handle('collection:create', (_e, input: CollectionCreateInput) => createCollection(input))
+  ipcMain.handle('collection:update', (_e, input: CollectionUpdateInput) => updateCollection(input))
+  ipcMain.handle('collection:delete', (_e, id: string) => deleteCollection(id))
+  ipcMain.handle('collection:addPapers', (_e, id: string, paperIds: string[]) =>
+    addPapersToCollection(id, paperIds)
+  )
+  ipcMain.handle('collection:removePapers', (_e, id: string, paperIds: string[]) =>
+    removePapersFromCollection(id, paperIds)
   )
 
-  /*
-   * 「生成研究想法」。输入不需要渲染层给：它只吃**已确认的**论文关系，
-   * 范围由数据决定 —— 让界面传一个「归纳范围」进来，反而会把「站在你自己的判断上」
-   * 这条约束变成一句文案。
-   */
-  ipcMain.handle('ai:synthesizeIdeas', () =>
-    queuedTask<AiTaskResult>('组合研究想法', () => runIdeaSynthesis())
+  /* 开放问题池 ------------------------------------------------------- */
+  ipcMain.handle('problems:get', (_e, scope: string) => getProblemMap(scope))
+  ipcMain.handle('problems:status', (_e, scope: string) => countProblemSources(scope))
+  ipcMain.handle('problems:build', (_e, scope: string) =>
+    queuedTask<{ ok: boolean; message?: string; map?: ProblemMap }>('汇总开放问题', async () => {
+      const map = await buildProblemMap(scope)
+      return { ok: true, message: `已汇总出 ${map.problems.length} 个开放问题`, map }
+    })
   )
 
-  /*
-   * 「AI 找关系」。它会逐对判断候选论文，慢的时候一两分钟 —— 所以任务名要具体，
-   * 顶部胶囊里显示「挖掘论文关系」比又一次「AI 正在处理」有信息量得多。
-   */
-  ipcMain.handle('ai:discoverLinks', (_e, paperId: string) =>
-    queuedTask<LinkDiscoveryResult>('挖掘论文关系', () => runLinkDiscovery({ paperId }))
+  /* 读论文风格（skill） ---------------------------------------------- */
+  ipcMain.handle('skill:get', () => {
+    // 老知识库是在有 skill 之前建的；读的时候补上，「在 Finder 中显示」才有东西可指
+    vault.ensureVaultStructure(requireVault())
+    return vault.readReadingSkill(requireVault())
+  })
+  ipcMain.handle('skill:save', (_e, content: string) => {
+    vault.writeReadingSkill(requireVault(), String(content ?? ''))
+    return vault.readReadingSkill(requireVault())
+  })
+  ipcMain.handle('skill:reset', () => {
+    vault.writeReadingSkill(requireVault(), DEFAULT_READING_SKILL)
+    return DEFAULT_READING_SKILL
+  })
+
+  /* 选题本 ----------------------------------------------------------- */
+  ipcMain.handle('ideas:list', () => listIdeas())
+  ipcMain.handle('ideas:generate', (_e, scope: string, problemTitle: string) =>
+    queuedTask<{ ok: boolean; message?: string; ideas?: ResearchIdea[] }>('生成选题', async () => {
+      const ideas = await generateIdeas(scope, problemTitle)
+      return { ok: true, message: `生成了 ${ideas.length} 个选题`, ideas }
+    })
+  )
+  ipcMain.handle('ideas:update', (_e, id: string, patch: IdeaPatch) => updateIdea(id, patch))
+  ipcMain.handle('ideas:delete', (_e, id: string) => deleteIdea(id))
+
+  /* 参考文献对照 ----------------------------------------------------- */
+  ipcMain.handle('refs:get', (_e, paperId: string) => getReferences(paperId))
+  ipcMain.handle('refs:extract', (_e, paperId: string) =>
+    queuedTask<{ ok: boolean; message?: string; list?: ReferenceList }>(
+      '抽取参考文献',
+      async () => {
+        const list = await extractReferences(paperId)
+        return { ok: true, message: `识别出 ${list.items.length} 条参考文献`, list }
+      }
+    )
+  )
+  ipcMain.handle('refs:addToLibrary', (_e, paperId: string, index: number) =>
+    addReferenceToLibrary(paperId, index)
   )
 
   /**
@@ -434,16 +494,6 @@ export function registerIpc(): void {
     interactiveTask((signal) => runAutoHighlight(input.paperId, input.lines, signal))
   )
 
-  /* 「考考我」出题：用户点了在等，走交互通道（理由同划词） */
-  ipcMain.handle('ai:quiz', (_e, paperId: string) =>
-    interactiveTask((signal) => runQuiz(paperId, signal))
-  )
-
-  /* 「演示」生成：一次整理出一份讲稿，同样是「点了在等」的请求 */
-  ipcMain.handle('ai:slides', (_e, paperId: string) =>
-    interactiveTask((signal) => runSlideDeck(paperId, signal))
-  )
-
   ipcMain.handle('ai:buildProfiles', (_e, ids: string[] | 'missing') =>
     queuedTask<BatchProfileResult>('批量抽取实验画像', () => runBuildProfiles(ids), {
       total: 0,
@@ -456,23 +506,16 @@ export function registerIpc(): void {
   ipcMain.handle('task:cancel', (): boolean => tasks.cancel())
   ipcMain.handle('task:state', (): TaskState | null => tasks.state())
 
-  /* 知识图谱 -------------------------------------------------------- */
-  ipcMain.handle('graph:snapshot', (_e, scope?: GraphScope): GraphData => {
-    if (!db.isOpen()) {
-      return { nodes: [], edges: [], stats: EMPTY_GRAPH_STATS }
-    }
-    return graphSnapshot(scope ?? {})
+  /* 写作思路 -------------------------------------------------------- */
+  /*
+   * 一个频道供整页：卡片与套路是**同一次计算**的两个视图。
+   * 拆成两个频道的话，聚类参数一改就会一边新一遍旧，界面上出现
+   * 「套路里有这篇、卡片列表里却没有」这种对不上的状态。
+   */
+  ipcMain.handle('writing:overview', (): WritingOverview => {
+    if (!db.isOpen()) return { cards: [], patterns: [], singletons: [] }
+    return buildWritingOverview(db.listWritingLogicRows())
   })
-
-  ipcMain.handle(
-    'graph:multiHop',
-    (_e, startId: string, hops?: number, scope?: GraphScope): MultiHopResult => {
-      if (!db.isOpen() || !startId) {
-        return { start: null, paths: [], highlightNodes: [], highlightEdges: [], maxHops: 0 }
-      }
-      return multiHopPaths(startId, hops ?? 2, scope ?? {})
-    }
-  )
 
   /* 句式库 ---------------------------------------------------------- */
   ipcMain.handle('phrases:list', (): PhraseEntry[] => {
@@ -496,55 +539,6 @@ export function registerIpc(): void {
     const entries = buildPhraseBank(inputs)
     phraseCache = { key, entries }
     return entries
-  })
-
-  /* 综述 ----------------------------------------------------------- */
-  ipcMain.handle('synthesis:list', (): Synthesis[] => db.listSyntheses())
-
-  ipcMain.handle('synthesis:get', (_e, id: string) => db.getSynthesis(id))
-
-  ipcMain.handle('synthesis:save', (_e, id: string, title: string, content: string) => {
-    const vaultPath = requireVault()
-    const existing = db.getSynthesis(id)
-    if (!existing) throw new Error('综述不存在。')
-    const abs = vault.resolveInside(vaultPath, existing.relPath)
-    if (!abs) throw new Error('综述路径不在知识库内，已拒绝写入。')
-    const now = new Date().toISOString()
-    writeFileSync(
-      abs,
-      matter.stringify(content + '\n', {
-        id,
-        title,
-        type: 'synthesis',
-        scope: existing.scope,
-        paperCount: existing.paperCount,
-        createdAt: existing.createdAt,
-        updatedAt: now
-      }),
-      'utf-8'
-    )
-    db.upsertSynthesis({
-      id,
-      title,
-      scope: existing.scope,
-      content,
-      relPath: existing.relPath,
-      paperCount: existing.paperCount,
-      createdAt: existing.createdAt,
-      updatedAt: now
-    })
-    return db.getSynthesis(id)
-  })
-
-  ipcMain.handle('synthesis:delete', (_e, id: string) => {
-    const vaultPath = requireVault()
-    const existing = db.getSynthesis(id)
-    if (existing) {
-      const abs = vault.resolveInside(vaultPath, existing.relPath)
-      if (abs) rmSync(abs, { force: true })
-    }
-    db.removeSynthesisRow(id)
-    return true
   })
 
   /* 统计与设置 ------------------------------------------------------ */

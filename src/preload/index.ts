@@ -1,17 +1,24 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
-import type { PaperVaultApi, StreamDelta, TaskProgress } from '@shared/api'
+import type {
+  ChatOptions,
+  ChatScope,
+  PaperVaultApi,
+  StreamDelta,
+  TaskProgress
+} from '@shared/api'
 import type {
   AppSettings,
   ChatMessage,
+  CollectionCreateInput,
+  CollectionUpdateInput,
   LlmSettings,
   PaperCreateInput,
-  PaperUpdateInput,
-  SynthesisScopeInput
+  PaperUpdateInput
 } from '@shared/types'
 import type { ImportPdfPayload } from '@shared/api'
 import type { LensId } from '@shared/lenses'
-import type { GraphScope } from '@shared/graph'
 import type { Highlight } from '@shared/highlights'
+import type { IdeaPatch } from '@shared/ideas'
 import type { SourceLine } from '@shared/autohighlight'
 
 /**
@@ -89,13 +96,9 @@ const api: PaperVaultApi = {
     summarize: (id, instruction) => ipcRenderer.invoke('ai:summarize', id, instruction),
     rewriteSection: (id, sectionKey, instruction) =>
       ipcRenderer.invoke('ai:rewriteSection', id, sectionKey, instruction),
-    chat: (paperIds: string[], messages: ChatMessage[]) =>
-      ipcRenderer.invoke('ai:chat', paperIds, messages),
-    synthesize: (input: SynthesisScopeInput) => ipcRenderer.invoke('ai:synthesize', input),
-    synthesizeIdeas: () => ipcRenderer.invoke('ai:synthesizeIdeas'),
-    comboAnalyze: (input: { paperIds: string[]; title?: string; synthesisId?: string }) =>
-      ipcRenderer.invoke('ai:comboAnalyze', input),
-    discoverLinks: (paperId: string) => ipcRenderer.invoke('ai:discoverLinks', paperId),
+    chat: (paperIds: string[], messages: ChatMessage[], scope?: ChatScope, options?: ChatOptions) =>
+      ipcRenderer.invoke('ai:chat', paperIds, messages, scope, options),
+    cancelChat: (streamId: string) => ipcRenderer.invoke('ai:cancelChat', streamId),
     buildProfile: (id: string) => ipcRenderer.invoke('ai:buildProfile', id),
     passage: (input: {
       paperId: string
@@ -107,29 +110,53 @@ const api: PaperVaultApi = {
     }) => ipcRenderer.invoke('ai:passage', input),
     autoHighlight: (input: { paperId: string; lines: SourceLine[] }) =>
       ipcRenderer.invoke('ai:autoHighlight', input),
-    quiz: (paperId: string) => ipcRenderer.invoke('ai:quiz', paperId),
-    slides: (paperId: string) => ipcRenderer.invoke('ai:slides', paperId),
     buildProfiles: (ids: string[] | 'missing') => ipcRenderer.invoke('ai:buildProfiles', ids),
     runLens: (id: string, lensIds: LensId | LensId[], instruction?: string) =>
       ipcRenderer.invoke('ai:runLens', id, lensIds, instruction)
   },
+  collections: {
+    list: () => ipcRenderer.invoke('collection:list'),
+    get: (id: string) => ipcRenderer.invoke('collection:get', id),
+    create: (input: CollectionCreateInput) => ipcRenderer.invoke('collection:create', input),
+    update: (input: CollectionUpdateInput) => ipcRenderer.invoke('collection:update', input),
+    remove: (id: string) => ipcRenderer.invoke('collection:delete', id),
+    addPapers: (id: string, paperIds: string[]) =>
+      ipcRenderer.invoke('collection:addPapers', id, paperIds),
+    removePapers: (id: string, paperIds: string[]) =>
+      ipcRenderer.invoke('collection:removePapers', id, paperIds)
+  },
+  problems: {
+    get: (scope: string) => ipcRenderer.invoke('problems:get', scope),
+    status: (scope: string) => ipcRenderer.invoke('problems:status', scope),
+    build: (scope: string) => ipcRenderer.invoke('problems:build', scope)
+  },
+  skill: {
+    get: () => ipcRenderer.invoke('skill:get'),
+    save: (content: string) => ipcRenderer.invoke('skill:save', content),
+    reset: () => ipcRenderer.invoke('skill:reset')
+  },
+  ideas: {
+    list: () => ipcRenderer.invoke('ideas:list'),
+    generate: (scope: string, problemTitle: string) =>
+      ipcRenderer.invoke('ideas:generate', scope, problemTitle),
+    update: (id: string, patch: IdeaPatch) => ipcRenderer.invoke('ideas:update', id, patch),
+    delete: (id: string) => ipcRenderer.invoke('ideas:delete', id)
+  },
+  refs: {
+    get: (paperId: string) => ipcRenderer.invoke('refs:get', paperId),
+    extract: (paperId: string) => ipcRenderer.invoke('refs:extract', paperId),
+    addToLibrary: (paperId: string, index: number) =>
+      ipcRenderer.invoke('refs:addToLibrary', paperId, index)
+  },
   phrases: {
     list: () => ipcRenderer.invoke('phrases:list')
   },
-  graph: {
-    snapshot: (scope?: GraphScope) => ipcRenderer.invoke('graph:snapshot', scope),
-    multiHop: (startId: string, hops?: number, scope?: GraphScope) =>
-      ipcRenderer.invoke('graph:multiHop', startId, hops, scope)
+  writing: {
+    overview: () => ipcRenderer.invoke('writing:overview')
   },
   task: {
     cancel: () => ipcRenderer.invoke('task:cancel'),
     state: () => ipcRenderer.invoke('task:state')
-  },
-  synthesis: {
-    list: () => ipcRenderer.invoke('synthesis:list'),
-    get: (id) => ipcRenderer.invoke('synthesis:get', id),
-    save: (id, title, content) => ipcRenderer.invoke('synthesis:save', id, title, content),
-    remove: (id) => ipcRenderer.invoke('synthesis:delete', id)
   },
   stats: {
     overview: () => ipcRenderer.invoke('stats:overview')

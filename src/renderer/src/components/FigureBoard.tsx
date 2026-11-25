@@ -15,13 +15,19 @@ import { Modal } from './ui'
 
 const fileNameOf = (relPath: string): string => relPath.split('/').pop() ?? relPath
 
-export function FigureThumb({ relPath, onClick }: { relPath: string; onClick?: () => void }): JSX.Element {
+export function FigureThumb({
+  relPath,
+  onClick
+}: {
+  relPath: string
+  onClick?: () => void
+}): JSX.Element {
   const { url, failed } = useFigureUrl(relPath)
   const name = fileNameOf(relPath)
 
   if (failed) {
     return (
-      <div className="flex items-center gap-1.5 rounded-lg border border-line bg-bg-raised px-2 py-3 text-[10.5px] text-ink-low">
+      <div className="flex items-center gap-1.5 rounded-lg border border-line bg-bg-raised px-2 py-3 text-caption text-ink-low">
         <ImageOff className="h-3.5 w-3.5 shrink-0" />
         图丢了：{name}
       </div>
@@ -56,7 +62,7 @@ export function FigureLightbox({
   return (
     <Modal open onClose={onClose} title={fileNameOf(relPath)} width="max-w-4xl">
       {failed ? (
-        <p className="flex items-center gap-2 text-[12px] text-ink-low">
+        <p className="flex items-center gap-2 text-ui text-ink-low">
           <ImageOff className="h-4 w-4" />
           图片找不到：{relPath}（可能已被删除）
         </p>
@@ -81,12 +87,10 @@ export function FigureLightbox({
  * 横向滚动而不是网格 —— 对照「同类论文的方法框架图」时，两三篇的图要能
  * 在同一行视线上直接比，网格会把这些图拆到不同行去。
  */
-export function FigureBoard({
-  papers
-}: {
-  papers: { id: string; title: string }[]
-}): JSX.Element {
-  const [columns, setColumns] = useState<Array<{ id: string; title: string; figures: string[] }>>([])
+export function FigureBoard({ papers }: { papers: { id: string; title: string }[] }): JSX.Element {
+  const [columns, setColumns] = useState<Array<{ id: string; title: string; figures: string[] }>>(
+    []
+  )
   const [loading, setLoading] = useState(true)
   const [zoom, setZoom] = useState<string | null>(null)
 
@@ -111,7 +115,7 @@ export function FigureBoard({
 
   if (loading) {
     return (
-      <div className="flex items-center gap-2 py-8 text-[12px] text-ink-low">
+      <div className="flex items-center gap-2 py-8 text-ui text-ink-low">
         <Loader2 className="h-4 w-4 animate-spin text-brand-soft" />
         正在读取这批论文的图库…
       </div>
@@ -120,7 +124,7 @@ export function FigureBoard({
 
   if (!columns.some((col) => col.figures.length)) {
     return (
-      <p className="rounded-xl border border-dashed border-line px-4 py-8 text-center text-[12px] leading-relaxed text-ink-low">
+      <p className="rounded-xl border border-dashed border-line px-4 py-8 text-center text-ui leading-relaxed text-ink-low">
         这批论文还没有截过原文图。
         <br />
         打开一篇论文的「原文」标签页，用「截取图表」框选，图就会出现在这里。
@@ -133,7 +137,7 @@ export function FigureBoard({
       <div className="flex gap-3 overflow-x-auto pb-2">
         {columns.map((col) => (
           <section key={col.id} className="w-[230px] shrink-0 space-y-1.5">
-            <h4 title={col.title} className="truncate text-[11.5px] font-medium text-ink-mid">
+            <h4 title={col.title} className="truncate text-meta font-medium text-ink-mid">
               {col.title}
             </h4>
             {col.figures.length ? (
@@ -141,7 +145,7 @@ export function FigureBoard({
                 <FigureThumb key={rel} relPath={rel} onClick={() => setZoom(rel)} />
               ))
             ) : (
-              <p className="rounded-lg border border-dashed border-line px-2 py-4 text-center text-[10.5px] text-ink-low">
+              <p className="rounded-lg border border-dashed border-line px-2 py-4 text-center text-caption text-ink-low">
                 还没截过图
               </p>
             )}

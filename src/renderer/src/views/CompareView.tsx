@@ -111,9 +111,7 @@ export function CompareView(): JSX.Element {
     () => buildColumns(settings.customCategories),
     [settings.customCategories]
   )
-  const visibleColumns = allColumns
-    ? columns
-    : columns.filter((c) => CORE_COLUMNS.includes(c.key))
+  const visibleColumns = allColumns ? columns : columns.filter((c) => CORE_COLUMNS.includes(c.key))
 
   const runFill = async (): Promise<void> => {
     setConfirmOpen(false)
@@ -134,13 +132,8 @@ export function CompareView(): JSX.Element {
   const exportCsv = (): void => {
     const header = columns.map((c) => c.label)
     const body = rows.map((p) => columns.map((c) => c.text(p)))
-    const csv = [header, ...body]
-      .map((line) => line.map(csvCell).join(','))
-      .join('\n')
-    downloadText(
-      `实验对比-${scopeLabel(scope, settings.customCategories)}.csv`,
-      `\uFEFF${csv}`
-    )
+    const csv = [header, ...body].map((line) => line.map(csvCell).join(',')).join('\n')
+    downloadText(`实验对比-${scopeLabel(scope, settings.customCategories)}.csv`, `\uFEFF${csv}`)
   }
 
   const exportMarkdown = (): void => {
@@ -155,10 +148,7 @@ export function CompareView(): JSX.Element {
       `> 平均 ${agg.avgDatasets} 个数据集、${agg.avgBaselines} 个基线、${agg.avgAblations} 组消融；${agg.varianceReported} 篇报告了方差`,
       ''
     ].join('\n')
-    downloadText(
-      `实验对比-${label}.md`,
-      `${summary}\n${header}\n${divider}\n${body.join('\n')}\n`
-    )
+    downloadText(`实验对比-${label}.md`, `${summary}\n${header}\n${divider}\n${body.join('\n')}\n`)
   }
 
   if (papers.length === 0) {
@@ -179,7 +169,7 @@ export function CompareView(): JSX.Element {
         <header className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <h1 className="font-serif text-[18px] font-semibold text-ink-high">实验对比</h1>
-            <p className="mt-1 text-[12px] text-ink-mid">
+            <p className="mt-1 text-ui text-ink-mid">
               把同类论文的实验设置拉成一张表，看清这一类论文「一般怎么做实验」。
             </p>
           </div>
@@ -226,7 +216,7 @@ export function CompareView(): JSX.Element {
                 key={key}
                 onClick={() => setScope({ type: key, value: '' })}
                 className={cn(
-                  'rounded-lg px-2.5 py-1 text-[11.5px] transition',
+                  'rounded-lg px-2.5 py-1 text-meta transition',
                   scope.type === key
                     ? 'bg-brand/20 font-medium text-brand-mist'
                     : 'text-ink-mid hover:bg-white/[0.05] hover:text-ink-high'
@@ -275,15 +265,15 @@ export function CompareView(): JSX.Element {
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 placeholder="搜数据集 / 指标 / 模型名"
-                className="h-7 w-52 rounded-lg border border-line bg-bg-base pl-8 pr-2 text-[11.5px] text-ink-high outline-none placeholder:text-ink-low focus:border-brand/50"
+                className="h-7 w-52 rounded-lg border border-line bg-bg-base pl-8 pr-2 text-meta text-ink-high outline-none placeholder:text-ink-low focus:border-brand/50"
               />
             </div>
-            <div className="flex items-center gap-1 text-[11px] text-ink-low">
+            <div className="flex items-center gap-1 text-meta text-ink-low">
               <ArrowUpDown className="h-3 w-3" />
               <select
                 value={sort}
                 onChange={(e) => setSort(e.target.value as SortKey)}
-                className="h-7 rounded-lg border border-line bg-bg-base px-1.5 text-[11.5px] text-ink-mid outline-none focus:border-brand/50"
+                className="h-7 rounded-lg border border-line bg-bg-base px-1.5 text-meta text-ink-mid outline-none focus:border-brand/50"
               >
                 <option value="updated" className="bg-bg-overlay">
                   最近更新
@@ -306,7 +296,7 @@ export function CompareView(): JSX.Element {
         </div>
 
         {missing.length ? (
-          <div className="flex items-center gap-2 rounded-xl border border-warn/30 bg-warn/[0.07] px-3.5 py-2.5 text-[11.5px] text-warn">
+          <div className="flex items-center gap-2 rounded-xl border border-warn/30 bg-warn/[0.07] px-3.5 py-2.5 text-meta text-warn">
             <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
             当前范围内有 {missing.length} 篇还没有实验画像，它们不会进入下面的统计。
             可以点右上角「补齐画像」批量抽取（只读实验章节，比整篇精读便宜很多）。
@@ -323,13 +313,13 @@ export function CompareView(): JSX.Element {
           <Card title="画像覆盖">
             <div className="text-[22px] font-semibold leading-none text-ink-high">
               {agg.withProfile}
-              <span className="text-[13px] font-normal text-ink-low"> / {agg.total}</span>
+              <span className="text-body font-normal text-ink-low"> / {agg.total}</span>
             </div>
             <Progress
               value={agg.total ? Math.round((agg.withProfile / agg.total) * 100) : 0}
               color="#38735A"
             />
-            <p className="mt-1.5 text-[10.5px] text-ink-low">已抽取实验画像的论文占比</p>
+            <p className="mt-1.5 text-caption text-ink-low">已抽取实验画像的论文占比</p>
           </Card>
 
           <Card title="实验规模（均值）">
@@ -338,7 +328,7 @@ export function CompareView(): JSX.Element {
               <Metric value={agg.avgBaselines} label="基线" />
               <Metric value={agg.avgAblations} label="消融组" />
             </div>
-            <p className="mt-2 text-[10.5px] text-ink-low">
+            <p className="mt-2 text-caption text-ink-low">
               消融最多的一篇做了 {agg.maxAblations} 组；{agg.realWorldCount} 篇有真机/真实场景实验
             </p>
           </Card>
@@ -346,16 +336,18 @@ export function CompareView(): JSX.Element {
           <Card title="统计严谨性">
             <div className="text-[22px] font-semibold leading-none text-ink-high">
               {agg.varianceReported}
-              <span className="text-[13px] font-normal text-ink-low">
+              <span className="text-body font-normal text-ink-low">
                 {' '}
                 / {agg.withProfile} 篇报告方差
               </span>
             </div>
             <Progress
-              value={agg.withProfile ? Math.round((agg.varianceReported / agg.withProfile) * 100) : 0}
+              value={
+                agg.withProfile ? Math.round((agg.varianceReported / agg.withProfile) * 100) : 0
+              }
               color="#5FA983"
             />
-            <p className="mt-1.5 text-[10.5px] leading-relaxed text-ink-low">
+            <p className="mt-1.5 text-caption leading-relaxed text-ink-low">
               {agg.runsReported} 篇说明了重复次数/种子，
               {agg.varianceNotReported} 篇明确只跑一次
             </p>
@@ -380,7 +372,7 @@ export function CompareView(): JSX.Element {
             </div>
             <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1">
               {MODEL_ORDER.map((choice) => (
-                <span key={choice} className="flex items-center gap-1 text-[10.5px] text-ink-mid">
+                <span key={choice} className="flex items-center gap-1 text-caption text-ink-mid">
                   <span
                     className="h-1.5 w-1.5 rounded-full"
                     style={{ background: MODEL_CHOICE_COLOR[choice] }}
@@ -409,7 +401,7 @@ export function CompareView(): JSX.Element {
           />
         ) : (
           <>
-            <div className="flex items-center justify-between gap-2 text-[10.5px] text-ink-low">
+            <div className="flex items-center justify-between gap-2 text-caption text-ink-low">
               <span>
                 {rows.length} 篇 · 显示 {visibleColumns.length}/{columns.length} 列
                 {allColumns ? ' · 表格可横向滚动看全部列' : ''}
@@ -422,49 +414,49 @@ export function CompareView(): JSX.Element {
               </button>
             </div>
             <div className="overflow-hidden rounded-lg border border-line">
-            <div className="overflow-x-auto">
-              <table className="w-full border-collapse text-[11.5px]">
-                <thead>
-                  <tr className="bg-bg-raised">
-                    {visibleColumns.map((c) => (
-                      <th
-                        key={c.key}
-                        className={cn(
-                          'whitespace-nowrap border-b border-line px-2.5 py-2 text-left font-medium text-ink-mid',
-                          c.width
-                        )}
-                      >
-                        {c.label}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {rows.map((paper, index) => (
-                    <tr
-                      key={paper.id}
-                      onClick={() => {
-                        setView('library')
-                        void selectPaper(paper.id)
-                      }}
-                      className={cn(
-                        'cursor-pointer border-b border-line/60 transition hover:bg-white/[0.04]',
-                        index % 2 ? 'bg-white/[0.012]' : ''
-                      )}
-                    >
+              <div className="overflow-x-auto">
+                <table className="w-full border-collapse text-meta">
+                  <thead>
+                    <tr className="bg-bg-raised">
                       {visibleColumns.map((c) => (
-                        <td
+                        <th
                           key={c.key}
-                          className={cn('px-2.5 py-2 align-top text-ink-high', c.width)}
+                          className={cn(
+                            'whitespace-nowrap border-b border-line px-2.5 py-2 text-left font-medium text-ink-mid',
+                            c.width
+                          )}
                         >
-                          {c.render ? c.render(paper) : <CellText text={c.text(paper)} />}
-                        </td>
+                          {c.label}
+                        </th>
                       ))}
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                  </thead>
+                  <tbody>
+                    {rows.map((paper, index) => (
+                      <tr
+                        key={paper.id}
+                        onClick={() => {
+                          setView('library')
+                          void selectPaper(paper.id)
+                        }}
+                        className={cn(
+                          'cursor-pointer border-b border-line/60 transition hover:bg-white/[0.04]',
+                          index % 2 ? 'bg-white/[0.012]' : ''
+                        )}
+                      >
+                        {visibleColumns.map((c) => (
+                          <td
+                            key={c.key}
+                            className={cn('px-2.5 py-2 align-top text-ink-high', c.width)}
+                          >
+                            {c.render ? c.render(paper) : <CellText text={c.text(paper)} />}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </div>
           </>
         )}
@@ -487,12 +479,11 @@ export function CompareView(): JSX.Element {
           </>
         }
       >
-        <p className="text-[12.5px] leading-relaxed text-ink-mid">
+        <p className="text-ui leading-relaxed text-ink-mid">
           会逐篇顺序调用模型（模型：
-          <span className="text-ink-high">{settings.llm.model || '未配置'}</span>），
-          中途可以随时关掉页面，已经完成的会立即写入对应的 Markdown。
-          按每篇约 2-4 千 token 估算，{missing.length} 篇大约需要{' '}
-          {(missing.length * 3).toFixed(0)} 千 token 的输入量。
+          <span className="text-ink-high">{settings.llm.model || '未配置'}</span>
+          ）， 中途可以随时关掉页面，已经完成的会立即写入对应的 Markdown。 按每篇约 2-4 千 token
+          估算，{missing.length} 篇大约需要 {(missing.length * 3).toFixed(0)} 千 token 的输入量。
         </p>
       </Modal>
     </main>
@@ -546,9 +537,7 @@ function buildColumns(custom: TaxonomyNode[]): ColumnDef[] {
       label: '年',
       width: 'w-14',
       text: (p) => (p.year ? String(p.year) : ''),
-      render: (p) => (
-        <span className="text-ink-mid">{p.year ?? '—'}</span>
-      )
+      render: (p) => <span className="text-ink-mid">{p.year ?? '—'}</span>
     },
     {
       key: 'categories',
@@ -618,8 +607,7 @@ function buildColumns(custom: TaxonomyNode[]): ColumnDef[] {
       key: 'variance',
       label: '方差',
       width: 'w-16',
-      text: (p) =>
-        p.exp?.reportsVariance == null ? '' : p.exp.reportsVariance ? '是' : '否',
+      text: (p) => (p.exp?.reportsVariance == null ? '' : p.exp.reportsVariance ? '是' : '否'),
       render: (p) => {
         if (p.exp?.reportsVariance == null) return <span className="text-ink-low">—</span>
         return p.exp.reportsVariance ? (
@@ -647,8 +635,7 @@ function buildColumns(custom: TaxonomyNode[]): ColumnDef[] {
       key: 'models',
       label: '具体模型',
       width: 'min-w-[160px]',
-      text: (p) =>
-        [...(p.exp?.openModels ?? []), ...(p.exp?.closedModels ?? [])].join(' | '),
+      text: (p) => [...(p.exp?.openModels ?? []), ...(p.exp?.closedModels ?? [])].join(' | '),
       render: (p) => {
         const names = [...(p.exp?.openModels ?? []), ...(p.exp?.closedModels ?? [])]
         if (!names.length) return <span className="text-ink-low">—</span>
@@ -717,7 +704,7 @@ function CellText({ text }: { text: string }): JSX.Element {
 function Card({ title, children }: { title: string; children: React.ReactNode }): JSX.Element {
   return (
     <section className="card p-3.5">
-      <div className="mb-2 text-[11px] font-medium uppercase tracking-wider text-ink-low">
+      <div className="mb-2 text-meta font-medium uppercase tracking-wider text-ink-low">
         {title}
       </div>
       {children}
@@ -729,7 +716,7 @@ function Metric({ value, label }: { value: number; label: string }): JSX.Element
   return (
     <div>
       <div className="text-[20px] font-semibold leading-none text-ink-high">{value}</div>
-      <div className="mt-1 text-[10.5px] text-ink-low">{label}</div>
+      <div className="mt-1 text-caption text-ink-low">{label}</div>
     </div>
   )
 }
@@ -757,19 +744,16 @@ function FreqPanel({
   const max = Math.max(1, ...items.map((i) => i.count))
   return (
     <section className="card p-3.5">
-      <div className="mb-2 text-[11px] font-medium uppercase tracking-wider text-ink-low">
+      <div className="mb-2 text-meta font-medium uppercase tracking-wider text-ink-low">
         {title}
       </div>
       {items.length === 0 ? (
-        <p className="py-2 text-[11.5px] text-ink-low">还没有数据</p>
+        <p className="py-2 text-meta text-ink-low">还没有数据</p>
       ) : (
         <div className="space-y-1.5">
           {items.map((item) => (
             <div key={item.name} className="flex items-center gap-2">
-              <span
-                className="w-28 shrink-0 truncate text-[11px] text-ink-mid"
-                title={item.name}
-              >
+              <span className="w-28 shrink-0 truncate text-meta text-ink-mid" title={item.name}>
                 {item.name}
               </span>
               {/* 条子限宽：卡片被拉宽时，一根代表「2 篇」的长条会显得很空 */}
@@ -783,7 +767,7 @@ function FreqPanel({
                   }}
                 />
               </div>
-              <span className="w-6 shrink-0 text-right text-[10.5px] text-ink-low">
+              <span className="w-6 shrink-0 text-right text-caption text-ink-low">
                 {item.count}
               </span>
             </div>
@@ -799,10 +783,7 @@ function csvCell(value: string): string {
   return /[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v
 }
 
-function scopeLabel(
-  scope: { type: ScopeType; value: string },
-  custom: TaxonomyNode[]
-): string {
+function scopeLabel(scope: { type: ScopeType; value: string }, custom: TaxonomyNode[]): string {
   if (scope.type === 'all') return '全部'
   if (scope.type === 'category') return categoryLabel(scope.value, custom)
   return `#${scope.value}`

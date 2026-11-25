@@ -116,6 +116,7 @@ async function main(): Promise<void> {
         datasets: (f.exp.datasets as string[]) ?? [],
         baselines: [],
         metrics: (f.exp.metrics as string[]) ?? [],
+        experiments: [],
         ablationCount: null,
         runs: '',
         reportsVariance: null,
@@ -124,6 +125,10 @@ async function main(): Promise<void> {
         closedModels: [],
         compute: '',
         scale: '',
+        // 这个脚本只关心「数据集名只出现在画像里」这条检索语义，其余字段填空即可。
+        // 注意：画像加字段时这里要同步，否则会缺字段而编译失败（已经发生过一次）。
+        dataUsage: 'unclear',
+        dataUsageNote: '',
         humanEval: '',
         realWorld: null,
         note: ''

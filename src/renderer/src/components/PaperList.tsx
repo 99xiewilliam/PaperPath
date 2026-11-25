@@ -4,6 +4,7 @@ import {
   Check,
   CheckSquare,
   FileText,
+  Layers,
   Plus,
   Search,
   SlidersHorizontal,
@@ -20,6 +21,7 @@ import { authorLine, cn, formatDate, truncate } from '@/lib/utils'
 import { selectVisiblePapers, useAppStore } from '@/store/useAppStore'
 import { useUiStore } from '@/store/useUiStore'
 import { usePanelStore } from '@/store/usePanelStore'
+import { AddToCollectionDialog } from './AddToCollectionDialog'
 import { Button, Chip, EmptyState, Field, IconButton, Modal, useConfirm } from './ui'
 
 /** 标签输入：逗号 / 空格分隔，允许带 # 前缀（和新建条目里的写法保持一致） */
@@ -70,7 +72,11 @@ export function PaperList(): JSX.Element {
   const bulkUpdate = useAppStore((s) => s.bulkUpdate)
   const { confirm, dialog: confirmDialog } = useConfirm()
   const [bulkOpen, setBulkOpen] = useState(false)
+  const [addToCollectionOpen, setAddToCollectionOpen] = useState(false)
+  const [collectionPaperIds, setCollectionPaperIds] = useState<string[]>([])
   const selectionActive = selectedIds.size > 0
+  const collections = useAppStore((s) => s.collections)
+  const activeCollection = collections.find((c) => c.id === filters.collectionId) ?? null
 
   /*
    * 「批量修改」弹窗的草稿。关掉即丢弃，不做持久化 —— 批量操作本来就是一次性的。
@@ -307,7 +313,7 @@ export function PaperList(): JSX.Element {
             className="field bg-bg-raised pl-8 pr-14"
           />
           {!queryDraft ? (
-            <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 rounded border border-line px-1.5 py-0.5 font-mono text-[9.5px] tracking-wide text-ink-low">
+            <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 rounded border border-line px-1.5 py-0.5 font-mono text-tiny tracking-wide text-ink-low">
               ⌘K
             </span>
           ) : null}
@@ -326,7 +332,7 @@ export function PaperList(): JSX.Element {
           <select
             value={filters.sort}
             onChange={(e) => setFilters({ sort: e.target.value as typeof filters.sort })}
-            className="h-7 flex-1 rounded-lg border border-line bg-bg-raised px-2 text-[11.5px] text-ink-mid outline-none focus:border-brand/50"
+            className="h-7 flex-1 rounded-lg border border-line bg-bg-raised px-2 text-meta text-ink-mid outline-none focus:border-brand/50"
           >
             {SORT_OPTIONS.map((o) => (
               <option key={o.value} value={o.value} className="bg-bg-overlay">
@@ -334,7 +340,7 @@ export function PaperList(): JSX.Element {
               </option>
             ))}
           </select>
-          <span className="shrink-0 tabular-nums text-[11px] text-ink-low">
+          <span className="shrink-0 tabular-nums text-meta text-ink-low">
             {papers.length}
             {papers.length !== total ? ` / ${total}` : ''} 篇
           </span>
@@ -346,8 +352,20 @@ export function PaperList(): JSX.Element {
           </IconButton>
         </div>
 
-        {activeFilterLabels.length || filters.status || filters.onlyUnread ? (
+        {activeFilterLabels.length || filters.status || filters.onlyUnread || activeCollection ? (
           <div className="flex flex-wrap gap-1">
+            {activeCollection ? (
+              <Chip
+                active
+                onClick={() => setFilters({ collectionId: null })}
+                className="gap-1"
+                title="点击移除"
+              >
+                <Layers className="h-2.5 w-2.5" />
+                {activeCollection.title}
+                <X className="h-2.5 w-2.5" />
+              </Chip>
+            ) : null}
             {filters.status ? (
               <Chip
                 active
@@ -371,7 +389,9 @@ export function PaperList(): JSX.Element {
                 active
                 color={categoryColor(filters.categories[i], settings.customCategories)}
                 onClick={() =>
-                  setFilters({ categories: filters.categories.filter((c) => c !== filters.categories[i]) })
+                  setFilters({
+                    categories: filters.categories.filter((c) => c !== filters.categories[i])
+                  })
                 }
                 title="点击移除"
               >
@@ -397,7 +417,7 @@ export function PaperList(): JSX.Element {
               total === 0 ? (
                 <button
                   onClick={() => openImport()}
-                  className="mt-1 rounded-lg bg-gradient-to-b from-[#41856A] to-[#2F644F] px-3.5 py-2 text-[12.5px] font-medium text-[#EDEAE0] shadow-[inset_0_1px_0_rgba(214,242,224,0.22)] transition hover:from-[#4A9175] hover:to-[#38735A]"
+                  className="mt-1 rounded-lg btn-primary px-3.5 py-2 text-ui font-medium transition"
                 >
                   导入第一篇论文
                 </button>
@@ -442,12 +462,10 @@ export function PaperList(): JSX.Element {
         <div className="shrink-0 border-t border-line bg-bg-raised px-3 py-2.5">
           <div className="mb-2 flex items-center gap-2">
             <CheckSquare className="h-3.5 w-3.5 shrink-0 text-brand-soft" />
-            <span className="text-[12px] font-medium text-ink-high">
-              已选 {selectedIds.size} 篇
-            </span>
+            <span className="text-ui font-medium text-ink-high">已选 {selectedIds.size} 篇</span>
             <button
               onClick={() => (allVisibleSelected ? clearSelection() : selectAllVisible())}
-              className="text-[11px] text-ink-low transition hover:text-ink-high"
+              className="text-meta text-ink-low transition hover:text-ink-high"
             >
               {allVisibleSelected ? '取消全选' : `全选可见（${papers.length}）`}
             </button>
@@ -456,7 +474,18 @@ export function PaperList(): JSX.Element {
             </IconButton>
           </div>
 
-          <div className="flex items-center gap-1.5">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <Button
+              size="xs"
+              variant="subtle"
+              icon={<Layers className="h-3 w-3" />}
+              onClick={() => {
+                setCollectionPaperIds([...selectedIds])
+                setAddToCollectionOpen(true)
+              }}
+            >
+              加入专题
+            </Button>
             <Button
               size="xs"
               variant="subtle"
@@ -558,7 +587,11 @@ export function PaperList(): JSX.Element {
                     )}
                     style={
                       mode === 'add'
-                        ? { color, borderColor: `${color}88`, background: `${color}22` }
+                        ? {
+                            color,
+                            borderColor: `${color}88`,
+                            background: `${color}22`
+                          }
                         : undefined
                     }
                   >
@@ -590,6 +623,12 @@ export function PaperList(): JSX.Element {
           </div>
         </div>
       </Modal>
+
+      <AddToCollectionDialog
+        open={addToCollectionOpen}
+        onClose={() => setAddToCollectionOpen(false)}
+        paperIds={collectionPaperIds}
+      />
 
       {confirmDialog}
     </section>
@@ -630,11 +669,7 @@ function PaperCard({
          * 「书签丝带」标记——实体书里读到哪一页就夹到哪一页的缎带。
          */
         'group relative w-full border-b border-line px-3 py-3 text-left transition last:border-b-0',
-        selected
-          ? 'bg-brand/[0.10]'
-          : active
-            ? 'bg-white/[0.03]'
-            : 'hover:bg-white/[0.02]'
+        selected ? 'bg-brand/[0.10]' : active ? 'bg-white/[0.03]' : 'hover:bg-white/[0.02]'
       )}
     >
       {active ? (
@@ -659,9 +694,7 @@ function PaperCard({
           }}
           className={cn(
             'mt-[3px] flex h-4 w-4 shrink-0 cursor-pointer items-center justify-center rounded-[5px] border transition',
-            selected
-              ? 'border-brand bg-brand text-[#EDEAE0]'
-              : 'border-strong text-transparent',
+            selected ? 'border-brand bg-brand text-ink-high' : 'border-strong text-transparent',
             !selected &&
               (selectionActive
                 ? 'opacity-60 hover:opacity-100'
@@ -675,11 +708,11 @@ function PaperCard({
           title={STATUS_LABEL[paper.status]}
         />
         <div className="min-w-0 flex-1">
-          <div className="line-clamp-2 font-serif text-[13px] font-medium leading-[1.5] text-ink-high">
+          <div className="line-clamp-2 font-serif text-body font-medium leading-[1.5] text-ink-high">
             {paper.title}
           </div>
 
-          <div className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[10.5px] text-ink-low">
+          <div className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-caption text-ink-low">
             <span>{paper.year ?? '—'}</span>
             {paper.venue ? (
               <>
@@ -699,7 +732,7 @@ function PaperCard({
           </div>
 
           {paper.tldr ? (
-            <p className="mt-1.5 line-clamp-2 text-[11.5px] leading-relaxed text-ink-mid">
+            <p className="mt-1.5 line-clamp-2 text-meta leading-relaxed text-ink-mid">
               {truncate(paper.tldr, 140)}
             </p>
           ) : null}
@@ -719,7 +752,7 @@ function PaperCard({
             </div>
           ) : null}
 
-          <div className="mt-2 flex items-center gap-2 tabular-nums text-[10px] text-ink-low">
+          <div className="mt-2 flex items-center gap-2 tabular-nums text-caption text-ink-low">
             {paper.rating > 0 ? (
               <span className="inline-flex items-center gap-0.5 text-warn">
                 <Star className="h-2.5 w-2.5 fill-current" />

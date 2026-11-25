@@ -1,52 +1,73 @@
 import { create } from 'zustand'
 import type {
   AppSettings,
+  CollectionCreateInput,
+  CollectionUpdateInput,
   PaperBulkUpdate,
+  PaperCollection,
   PaperCreateInput,
   PaperDetail,
   PaperStatus,
   PaperSummary,
   PaperUpdateInput,
   StatsOverview,
-  Synthesis,
   VaultStatus
 } from '@shared/types'
+import type { IdeaPatch, ResearchIdea } from '@shared/ideas'
 import { DEFAULT_SETTINGS } from './defaults'
 import { errorMessage } from '@/lib/utils'
 
-export type ViewKey =
-  | 'library'
-  | 'compare'
-  | 'phrases'
-  | 'graph'
-  | 'synthesis'
-  | 'dashboard'
-  | 'settings'
+export type ViewKey = 'library' | 'writing' | 'compare' | 'dashboard' | 'settings'
 
-/** ⌘1 ~ ⌘7 的顺序，与 Sidebar 导航一致 */
-export const VIEW_ORDER: ViewKey[] = [
-  'library',
-  'compare',
-  'phrases',
-  'graph',
-  'synthesis',
-  'dashboard',
-  'settings'
-]
+/**
+ * 侧栏真正渲染的顶级入口，只有四个：读 → 写 → 做实验 → 沉淀。
+ *
+ * 知识图谱与跨论文整块下线后，ViewKey 里也不再保留它们的键 —— 留一个没有
+ * 页面的键，谁将来 `setView('graph')` 一次就会看到一片空白。让编译器直接报错。
+ */
+export const NAV_KEYS = ['library', 'writing', 'compare', 'dashboard'] as const
+
+/** ⌘1 ~ ⌘4 的顺序，与 Sidebar 导航一致（设置不再占位，走 ⌘,） */
+export const VIEW_ORDER: ViewKey[] = [...NAV_KEYS]
+
+/**
+ * 子页 → 它属于哪个顶级入口。
+ *
+ * 两个用途，都是「别的地方不该各自判断一遍」：
+ *   - 侧栏高亮：进到知识图谱时高亮停在「沉淀」，而不是整排导航全灭；
+ *   - 从二级页返回时知道回哪。
+ * 将来把某个子页升回导航，也只改这一处。
+ */
+export const VIEW_GROUP: Record<ViewKey, ViewKey> = {
+  library: 'library',
+  writing: 'writing',
+  compare: 'compare',
+  dashboard: 'dashboard',
+  settings: 'settings'
+}
+
+/** 「写作思路」页的三个分区 */
+export type WritingTab = 'single' | 'pattern' | 'phrases'
+
+/** 一次性的跨页跳转意图，见 `AppState.writingIntent` */
+export interface WritingIntent {
+  tab: WritingTab
+  /** 要预选的论文（只有单篇分区用得上） */
+  paperId?: string
+}
 
 /** 视图标题的唯一来源：Sidebar 与设置页的快捷键表都从这里取，避免两处漂移 */
 export const VIEW_LABEL: Record<ViewKey, string> = {
   library: '论文库',
-  compare: '实验对比',
-  phrases: '句式库',
-  graph: '知识图谱',
   /*
-   * 这个页面里现在有三类文档：套路归纳、研究想法、组合分析。
-   * 名字取「跨论文」而不是「跨论文产出」—— 导航里其他项都是 3-4 个字，
-   * 多出来的那两个字换不来任何信息（页面内的说明已经讲清了三种来源）。
+   * 单篇逻辑卡与跨篇套路库共用一个入口。之前它们散在三个地方
+   * （详情页的写作手法章节 / 速览里的故事线 / 跨论文页的归纳），
+   * 找的时候得先判断「这件事归哪个页面管」。
    */
-  synthesis: '跨论文',
-  dashboard: '沉淀统计',
+  writing: '写作思路',
+  compare: '实验对比',
+  /* 叫「沉淀」而不是「沉淀统计」：它是要让人看到积累在变厚的那一屏 */
+  dashboard: '沉淀',
   settings: '设置'
 }
 
@@ -58,6 +79,8 @@ export interface Filters {
   sort: 'updated' | 'created' | 'rating' | 'importance' | 'year' | 'title'
   /** 只看还没有精读过的 */
   onlyUnread: boolean
+  /** 只看某个专题里的论文；null 表示不过滤 */
+  collectionId: string | null
 }
 
 export interface Toast {
@@ -71,7 +94,9 @@ interface AppState {
   vault: VaultStatus
   settings: AppSettings
   papers: PaperSummary[]
-  syntheses: Synthesis[]
+  collections: PaperCollection[]
+  /** 选题本。问题池里每个问题下的选题和「沉淀」页的选题本共用这一份 */
+  ideas: ResearchIdea[]
   detail: PaperDetail | null
   /**
    * 多选集合。与 `detail`（当前打开的那一篇）是两件独立的事：
@@ -96,16 +121,33 @@ interface AppState {
   /** 主进程正在跑的 AI 任务 id；null 表示空闲（用于决定要不要显示「取消」） */
   activeTaskId: string | null
   toasts: Toast[]
+  /**
+   * 跳到「写作思路」时要打开哪个分区、预选哪一篇。
+   *
+   * 这个应用没有路由，跨页面传参没有别的通道；而写进 URL 也不成立。
+   * 做成**一次性**字段：页面读到就清空，否则下次从导航点进来还会停在上次那篇，
+   * 看起来像「点了导航却回到了旧论文」。
+   *
+   * 从单个 paperId 升级成对象，是因为句式库并进来之后，详情页的
+   * 「查看句式库」要落到第三个分区，而不只是选中某篇论文。
+   */
+  writingIntent: WritingIntent | null
 
   init: () => Promise<void>
   chooseVault: () => Promise<void>
   rescan: () => Promise<void>
   refreshPapers: () => Promise<void>
-  refreshSyntheses: () => Promise<void>
+  refreshCollections: () => Promise<void>
   refreshStats: () => Promise<void>
   refreshAll: () => Promise<void>
 
   setView: (view: ViewKey) => void
+  /** 打开「写作思路」并预选某篇论文（论文详情页的「写作拆解」分组走这里） */
+  openWriting: (paperId: string) => void
+  /** 打开「写作思路」的指定分区（句式库入口走这里） */
+  openWritingTab: (tab: WritingTab, paperId?: string) => void
+  /** 取走一次性意图并清空（由 WritingView 消费） */
+  takeWritingIntent: () => WritingIntent | null
   setFilters: (patch: Partial<Filters>) => void
   resetFilters: () => void
   /** 走主进程的全文检索（覆盖笔记正文），结果写进 searchIds */
@@ -127,7 +169,29 @@ interface AppState {
   /** 批量抽实验画像（只跑结构化抽取，比整篇精读便宜）；成功后清空选择集 */
   bulkBuildProfiles: () => Promise<void>
 
-  patchSettings: (patch: Partial<AppSettings>) => Promise<void>
+  /**
+   * 点侧栏的专题：选中则过滤列表并打开专题面板；再点一次，若正在看其中一篇
+   * 就回到专题面板，否则取消筛选。
+   */
+  selectCollection: (id: string | null) => void
+  createCollection: (input: CollectionCreateInput) => Promise<PaperCollection | null>
+  updateCollection: (input: CollectionUpdateInput) => Promise<PaperCollection | null>
+  deleteCollection: (id: string) => Promise<void>
+  addPapersToCollection: (id: string, paperIds: string[]) => Promise<PaperCollection | null>
+  removePapersFromCollection: (id: string, paperIds: string[]) => Promise<PaperCollection | null>
+
+  refreshIdeas: () => Promise<void>
+  /** 针对问题池里的一个问题生成选题；返回是否成功 */
+  generateIdeas: (scope: string, problemTitle: string) => Promise<boolean>
+  updateIdea: (id: string, patch: IdeaPatch) => Promise<ResearchIdea | null>
+  deleteIdea: (id: string) => Promise<void>
+
+  /**
+   * 返回**是否真的写成功**：调用方要据此决定弹不弹「已保存」。
+   * 之前它返回 void，于是「设置没存进去」和「存好了」在调用方看来长得一样 ——
+   * 失败时这里弹了错误，调用方紧跟着又弹一句成功，用户看到两条互相打架的提示。
+   */
+  patchSettings: (patch: Partial<AppSettings>) => Promise<boolean>
 
   setBusy: (label: string | null) => void
   cancelTask: () => Promise<void>
@@ -141,7 +205,8 @@ const initialFilters: Filters = {
   tags: [],
   status: null,
   sort: 'updated',
-  onlyUnread: false
+  onlyUnread: false,
+  collectionId: null
 }
 
 let toastSeq = 0
@@ -154,10 +219,11 @@ let searchRequest = 0
 
 export const useAppStore = create<AppState>()((set, get) => ({
   ready: false,
-  vault: { opened: false, path: '', paperCount: 0, synthesisCount: 0 },
+  vault: { opened: false, path: '', paperCount: 0 },
   settings: DEFAULT_SETTINGS,
   papers: [],
-  syntheses: [],
+  collections: [],
+  ideas: [],
   detail: null,
   selectedIds: new Set<string>(),
   selectionAnchorId: null,
@@ -169,6 +235,7 @@ export const useAppStore = create<AppState>()((set, get) => ({
   busy: null,
   activeTaskId: null,
   toasts: [],
+  writingIntent: null,
 
   async init() {
     try {
@@ -228,29 +295,53 @@ export const useAppStore = create<AppState>()((set, get) => ({
     }
   },
 
+  /*
+   * 这几个都自带 catch：它们的调用点大量写作 `void refreshXxx()`（切视图时顺手刷新），
+   * 一旦 IPC 失败就是未处理的 rejection —— 页面静静停在旧/空数据上，用户什么也看不到。
+   */
   async refreshPapers() {
-    const papers = await window.papervault.papers.list()
-    set({ papers })
+    try {
+      const papers = await window.papervault.papers.list()
+      set({ papers })
+    } catch (err) {
+      get().toast(`读取论文列表失败：${errorMessage(err)}`, 'error')
+    }
   },
 
-  async refreshSyntheses() {
-    const syntheses = await window.papervault.synthesis.list()
-    set({ syntheses })
+  async refreshCollections() {
+    try {
+      const collections = await window.papervault.collections.list()
+      set({ collections })
+      const selected = get().filters.collectionId
+      if (selected && !collections.some((c) => c.id === selected)) {
+        set({ filters: { ...get().filters, collectionId: null } })
+      }
+    } catch (err) {
+      get().toast(`读取专题失败：${errorMessage(err)}`, 'error')
+    }
   },
 
   async refreshStats() {
-    const stats = await window.papervault.stats.overview()
-    set({ stats })
+    try {
+      const stats = await window.papervault.stats.overview()
+      set({ stats })
+    } catch (err) {
+      get().toast(`读取统计失败：${errorMessage(err)}`, 'error')
+    }
   },
 
   async refreshAll() {
-    const [papers, syntheses, stats, vault] = await Promise.all([
+    const [papers, stats, vault, collections] = await Promise.all([
       window.papervault.papers.list(),
-      window.papervault.synthesis.list(),
       window.papervault.stats.overview(),
-      window.papervault.vault.status()
+      window.papervault.vault.status(),
+      window.papervault.collections.list()
     ])
-    set({ papers, syntheses, stats, vault })
+    set({ papers, stats, vault, collections })
+    const selectedCollection = get().filters.collectionId
+    if (selectedCollection && !collections.some((c) => c.id === selectedCollection)) {
+      set({ filters: { ...get().filters, collectionId: null } })
+    }
 
     const { detail } = get()
     if (detail && !papers.some((p) => p.id === detail.id)) {
@@ -288,6 +379,21 @@ export const useAppStore = create<AppState>()((set, get) => ({
       void get().refreshPapers()
       void get().refreshStats()
     }
+  },
+
+  openWriting(paperId) {
+    get().openWritingTab('single', paperId)
+  },
+
+  openWritingTab(tab, paperId) {
+    set({ writingIntent: paperId ? { tab, paperId } : { tab } })
+    get().setView('writing')
+  },
+
+  takeWritingIntent() {
+    const intent = get().writingIntent
+    if (intent) set({ writingIntent: null })
+    return intent
   },
 
   setFilters(patch) {
@@ -481,6 +587,135 @@ export const useAppStore = create<AppState>()((set, get) => ({
     }
   },
 
+  selectCollection(id) {
+    const current = get().filters.collectionId
+    if (!id || (current === id && !get().detail)) {
+      set({ filters: { ...get().filters, collectionId: null } })
+      return
+    }
+    if (current === id && get().detail) {
+      void get().selectPaper(null)
+      return
+    }
+    set({ filters: { ...get().filters, collectionId: id }, view: 'library' })
+    void get().selectPaper(null)
+  },
+
+  async createCollection(input) {
+    try {
+      const collection = await window.papervault.collections.create(input)
+      await get().refreshCollections()
+      get().selectCollection(collection.id)
+      get().toast(`已创建专题「${collection.title}」`, 'success')
+      return collection
+    } catch (err) {
+      get().toast(`创建专题失败：${errorMessage(err)}`, 'error')
+      return null
+    }
+  },
+
+  async updateCollection(input) {
+    try {
+      const collection = await window.papervault.collections.update(input)
+      set((state) => ({
+        collections: state.collections
+          .map((c) => (c.id === collection.id ? collection : c))
+          .sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1))
+      }))
+      return collection
+    } catch (err) {
+      get().toast(`保存专题失败：${errorMessage(err)}`, 'error')
+      return null
+    }
+  },
+
+  async deleteCollection(id) {
+    try {
+      await window.papervault.collections.remove(id)
+      set((state) => ({
+        collections: state.collections.filter((c) => c.id !== id),
+        filters:
+          state.filters.collectionId === id
+            ? { ...state.filters, collectionId: null }
+            : state.filters
+      }))
+      get().toast('已删除该专题（论文本身还在）', 'success')
+    } catch (err) {
+      get().toast(`删除专题失败：${errorMessage(err)}`, 'error')
+    }
+  },
+
+  async addPapersToCollection(id, paperIds) {
+    try {
+      const collection = await window.papervault.collections.addPapers(id, paperIds)
+      set((state) => ({
+        collections: state.collections
+          .map((c) => (c.id === collection.id ? collection : c))
+          .sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1))
+      }))
+      return collection
+    } catch (err) {
+      get().toast(`加入专题失败：${errorMessage(err)}`, 'error')
+      return null
+    }
+  },
+
+  async removePapersFromCollection(id, paperIds) {
+    try {
+      const collection = await window.papervault.collections.removePapers(id, paperIds)
+      set((state) => ({
+        collections: state.collections.map((c) => (c.id === collection.id ? collection : c))
+      }))
+      return collection
+    } catch (err) {
+      get().toast(`移出专题失败：${errorMessage(err)}`, 'error')
+      return null
+    }
+  },
+
+  async refreshIdeas() {
+    try {
+      set({ ideas: await window.papervault.ideas.list() })
+    } catch (err) {
+      get().toast(`读取选题本失败：${errorMessage(err)}`, 'error')
+    }
+  },
+
+  async generateIdeas(scope, problemTitle) {
+    set({ busy: { label: '正在生成选题…' } })
+    try {
+      const res = await window.papervault.ideas.generate(scope, problemTitle)
+      if (res.ok && res.ideas) set((state) => ({ ideas: [...res.ideas!, ...state.ideas] }))
+      get().toast(res.message ?? '', res.ok ? 'success' : 'error')
+      return res.ok
+    } catch (err) {
+      get().toast(`生成选题失败：${errorMessage(err)}`, 'error')
+      return false
+    } finally {
+      set({ busy: null })
+    }
+  },
+
+  async updateIdea(id, patch) {
+    try {
+      const idea = await window.papervault.ideas.update(id, patch)
+      set((state) => ({ ideas: state.ideas.map((i) => (i.id === id ? idea : i)) }))
+      return idea
+    } catch (err) {
+      get().toast(`保存选题失败：${errorMessage(err)}`, 'error')
+      return null
+    }
+  },
+
+  async deleteIdea(id) {
+    try {
+      await window.papervault.ideas.delete(id)
+      set((state) => ({ ideas: state.ideas.filter((i) => i.id !== id) }))
+    } catch (err) {
+      get().toast(`删除选题失败：${errorMessage(err)}`, 'error')
+    }
+  },
+
   async bulkBuildProfiles() {
     const ids = [...get().selectedIds]
     if (!ids.length) return
@@ -502,8 +737,10 @@ export const useAppStore = create<AppState>()((set, get) => ({
       const settings = await window.papervault.settings.set(patch)
       set({ settings })
       await get().refreshStats()
+      return true
     } catch (err) {
       get().toast(`保存设置失败：${errorMessage(err)}`, 'error')
+      return false
     }
   },
 
@@ -548,6 +785,7 @@ let visibleCache: {
   papers: PaperSummary[]
   filters: Filters
   searchIds: Set<string> | null
+  collections: PaperCollection[]
   result: PaperSummary[]
 } | null = null
 
@@ -559,32 +797,38 @@ let visibleCache: {
  * 注意 searchIds === null 表示「没有搜索词」，与「空集合」含义不同。
  */
 export function selectVisiblePapers(state: AppState): PaperSummary[] {
-  const { papers, filters, searchIds } = state
+  const { papers, filters, searchIds, collections } = state
   if (
     visibleCache &&
     visibleCache.papers === papers &&
     visibleCache.filters === filters &&
-    visibleCache.searchIds === searchIds
+    visibleCache.searchIds === searchIds &&
+    visibleCache.collections === collections
   ) {
     return visibleCache.result
   }
 
-  const result = computeVisiblePapers(papers, filters, searchIds)
-  visibleCache = { papers, filters, searchIds, result }
+  const result = computeVisiblePapers(papers, filters, searchIds, collections)
+  visibleCache = { papers, filters, searchIds, collections, result }
   return result
 }
 
 function computeVisiblePapers(
   papers: PaperSummary[],
   filters: Filters,
-  searchIds: Set<string> | null
+  searchIds: Set<string> | null,
+  collections: PaperCollection[]
 ): PaperSummary[] {
-  const { categories, tags, status, sort, onlyUnread } = filters
+  const { categories, tags, status, sort, onlyUnread, collectionId } = filters
+  const memberIds = collectionId
+    ? new Set(collections.find((c) => c.id === collectionId)?.paperIds ?? [])
+    : null
 
   let list = papers.filter((p) => {
     if (status && p.status !== status) return false
     if (onlyUnread && p.aiFilled) return false
     if (searchIds && !searchIds.has(p.id)) return false
+    if (memberIds && !memberIds.has(p.id)) return false
     if (categories.length && !categories.some((c) => p.categories.includes(c))) return false
     if (tags.length && !tags.some((t) => p.tags.includes(t))) return false
     return true
@@ -606,6 +850,13 @@ function computeVisiblePapers(
   })
 
   return list
+}
+
+export function collectionsOfPaper(
+  collections: PaperCollection[],
+  paperId: string
+): PaperCollection[] {
+  return collections.filter((c) => c.paperIds.includes(paperId))
 }
 
 export function collectAllTags(papers: PaperSummary[]): { tag: string; count: number }[] {

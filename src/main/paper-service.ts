@@ -16,6 +16,7 @@ import type {
   PaperMeta,
   PaperUpdateInput
 } from '@shared/types'
+import { prunePaperFromCollections } from './collection-service'
 import * as db from './db'
 import { textSnippet } from './papertext'
 import { fileStamp, requireVault } from './runtime'
@@ -59,22 +60,30 @@ export function buildDetail(id: string): PaperDetail | null {
    */
   const file = vault.readPaperFileById(requireVault(), id, String(row.rel_path ?? ''))
   const sections = file?.sections ?? {}
+  const indexed = db.paperMetaFromRow(row)
   return {
     ...summary,
     /*
      * highlights / flow / mindmap / quiz 都要**从磁盘文件**取：它们在索引里没有
      * 独立的列，只认索引的话，详情页拿不到、下次保存又会把它删掉
      * （见 writePaperFile 的注释）。
+     *
+     * graph / phrases 同理，而且更严重 —— 它们以前**只写索引、不写 Markdown**，
+     * 于是索引一重建（或换台机器、删掉 .papervault）图谱就没了，图谱页随即显示
+     * 「还没有可以建图的数据」。现在两边都存，读的时候**磁盘优先**：
+     * 索引只是副本，副本可以落后，也可以丢。
      */
     meta: {
-      ...db.paperMetaFromRow(row),
+      ...indexed,
       highlights: file?.meta.highlights ?? [],
       flow: file?.meta.flow,
       mindmap: file?.meta.mindmap,
       quiz: file?.meta.quiz,
       slides: file?.meta.slides,
       links: file?.meta.links,
-      learningReview: file?.meta.learningReview
+      learningReview: file?.meta.learningReview,
+      graph: file?.meta.graph ?? indexed.graph,
+      phrases: file?.meta.phrases?.length ? file.meta.phrases : indexed.phrases
     },
     body: file?.body ?? renderBody(sections, getSettings().customSections),
     sections,
@@ -177,6 +186,11 @@ export function deletePaper(id: string): void {
   const textAbs = vault.resolveInside(vaultPath, join(vault.VAULT_DIRS.texts, `${id}.txt`))
   if (textAbs) rmSync(textAbs, { force: true })
   db.removePaperRow(id)
+  try {
+    prunePaperFromCollections(id)
+  } catch (err) {
+    console.warn('[paper] 从专题里剪掉这篇失败', err)
+  }
 }
 
 /* ------------------------------------------------------------------ */

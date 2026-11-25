@@ -1,0 +1,505 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>PaperVault · 系统流程图</title>
+<style>
+  :root {
+    --bg: #121216;
+    --panel: #1b1b21;
+    --panel-2: #22222b;
+    --line: #2d2d38;
+    --ink: #e9e9ef;
+    --ink-mid: #a6a6b5;
+    --ink-low: #73738a;
+    --brand: #7a84dd;
+    --accent: #e8b667;
+    --ok: #6fd3a0;
+    --warn: #e08c7a;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font: 14px/1.7 -apple-system, BlinkMacSystemFont, "SF Pro SC", "PingFang SC", "Helvetica Neue", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1280px; margin: 0 auto; padding: 44px 28px 80px; }
+
+  header.top { margin-bottom: 30px; }
+  .kicker { color: var(--brand); font-size: 12px; letter-spacing: .14em; text-transform: uppercase; }
+  h1 { font-size: 30px; margin: 8px 0 10px; letter-spacing: -.01em; }
+  .lede { color: var(--ink-mid); max-width: 780px; margin: 0; }
+  .lede b { color: var(--ink); font-weight: 600; }
+
+  .stats {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+    gap: 10px; margin-top: 22px;
+  }
+  .stat {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 12px; padding: 12px 14px;
+  }
+  .stat .n { font-size: 21px; font-weight: 600; letter-spacing: -.02em; }
+  .stat .l { font-size: 11px; color: var(--ink-low); margin-top: 2px; }
+
+  section { margin-top: 44px; }
+  .sec-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 4px; }
+  .sec-num {
+    font-size: 11px; color: var(--brand); border: 1px solid #3a3f6b;
+    border-radius: 6px; padding: 1px 7px; background: #1e2033;
+  }
+  h2 { font-size: 19px; margin: 0; letter-spacing: -.01em; }
+  .sec-sub { color: var(--ink-mid); margin: 6px 0 16px; max-width: 900px; }
+
+  .card {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 14px; padding: 18px; overflow-x: auto;
+  }
+  .mermaid { text-align: center; min-width: 640px; }
+
+  details { margin-top: 12px; }
+  summary {
+    cursor: pointer; color: var(--ink-low); font-size: 12px;
+    padding: 6px 0; list-style: none;
+  }
+  summary::-webkit-details-marker { display: none; }
+  summary:before { content: "▸ "; color: var(--brand); }
+  details[open] summary:before { content: "▾ "; }
+  details pre {
+    background: var(--panel-2); border: 1px solid var(--line);
+    border-radius: 10px; padding: 14px 16px; overflow-x: auto;
+    font: 12px/1.75 ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: var(--ink-mid); margin: 8px 0 0;
+  }
+
+  .tree {
+    background: var(--panel-2); border: 1px solid var(--line);
+    border-radius: 12px; padding: 16px 18px; overflow-x: auto;
+    font: 12.5px/1.85 ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: var(--ink-mid); white-space: pre;
+  }
+  .tree .d { color: var(--brand); }
+  .tree .f { color: var(--ink); }
+  .tree .c { color: var(--ink-low); }
+
+  .principles {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px;
+  }
+  .p {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 12px; padding: 15px 17px;
+  }
+  .p h3 { font-size: 13.5px; margin: 0 0 6px; }
+  .p p { margin: 0; color: var(--ink-mid); font-size: 12.5px; }
+  .p .why { color: var(--ink-low); font-size: 12px; margin-top: 8px; display: block; }
+
+  footer { margin-top: 56px; color: var(--ink-low); font-size: 12px; border-top: 1px solid var(--line); padding-top: 18px; }
+  code { background: var(--panel-2); padding: 1px 5px; border-radius: 5px; font-size: 12px; color: var(--ink-mid); }
+
+  .no-mermaid .mermaid { display: none; }
+  .no-mermaid .hint { display: block; }
+  .hint {
+    display: none; background: #2a2118; border: 1px solid #4a3a22;
+    color: var(--accent); border-radius: 10px; padding: 12px 14px; margin-bottom: 12px; font-size: 12.5px;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="top">
+    <div class="kicker">PaperVault · System Map</div>
+    <h1>整个系统的流程图</h1>
+    <p class="lede">
+      一个<b>本地优先</b>的论文精读工作台：Electron + React + TypeScript，数据落在你自己选的 Markdown 文件夹里，
+      应用本身只负责<b>索引</b>和<b>编排 AI</b>。下面六张图分别是：进程分层、一次 AI 精读的数据流、
+      AI 能力矩阵、功能地图、知识库目录、以及支撑这一切的设计原则。
+    </p>
+    <div class="stats">
+      <div class="stat"><div class="n">107</div><div class="l">源码文件</div></div>
+      <div class="stat"><div class="n">30,838</div><div class="l">行代码</div></div>
+      <div class="stat"><div class="n">57</div><div class="l">IPC 频道</div></div>
+      <div class="stat"><div class="n">11</div><div class="l">AI agent</div></div>
+      <div class="stat"><div class="n">11</div><div class="l">阅读透镜 lens</div></div>
+      <div class="stat"><div class="n">7 + 21</div><div class="l">视图 + 组件</div></div>
+    </div>
+  </header>
+
+  <div class="hint">
+    Mermaid 没能从 CDN 加载（可能没联网）。图渲染不出来，但每张图下面都附了**结构大纲**，内容一样。
+  </div>
+
+  <!-- ───────────────────────── ① 系统全貌 ───────────────────────── -->
+  <section>
+    <div class="sec-head"><span class="sec-num">01</span><h2>系统全貌：四层，一条边界</h2></div>
+    <p class="sec-sub">
+      渲染层碰不到磁盘，主进程是唯一能读写文件和数据库的地方，中间只留 57 个白名单频道通过。
+      这样即使界面代码出问题，也动不了你的笔记。
+    </p>
+    <div class="card">
+      <div class="mermaid">
+flowchart TB
+  subgraph L1["① 渲染层 · React"]
+    direction LR
+    V1["views ×7<br/>仪表盘 · 实验对比 · 知识图谱<br/>跨论文 · 句式库 · 设置 · 引导"]
+    V2["components ×21<br/>PDF 阅读器 2031 行 · 论文详情<br/>论文列表 · 图谱画布 · 幻灯片 · 问答"]
+    V3["store ×4<br/>useAppStore · chat · panel · ui"]
+  end
+
+  subgraph L2["② 桥 · 白名单契约"]
+    direction LR
+    P1["preload/index.ts<br/>contextBridge 只暴露声明过的方法"]
+    P2["shared/api.ts<br/>57 个频道 + 全部出入参类型"]
+    P3["shared 其余 20 个模块<br/>分类法 · 分页 · 高亮 · 图谱 · 幻灯"]
+  end
+
+  subgraph L3["③ 主进程 · 唯一能碰磁盘的地方"]
+    direction LR
+    M1["外壳<br/>窗口 · 菜单 · 独立 PDF 窗口"]
+    M2["数据层<br/>vault 读写 Markdown<br/>db 索引 · vault-service 扫描"]
+    M3["业务层<br/>论文 · 导入 · 图谱 · PDF 抽文"]
+    M4["AI 编排<br/>llm · ai-service<br/>11 agent · 11 lens"]
+    M5["任务与设置<br/>tasks 队列 · settings"]
+  end
+
+  subgraph L4["④ 磁盘 · 你的知识库"]
+    direction LR
+    D1["papers/*.md<br/>正文与章节"]
+    D2["figures/<br/>syntheses/"]
+    D3[".papervault/<br/>index.sqlite<br/>pdfs/ · texts/"]
+  end
+
+  L1 --> P2
+  P2 --> P1
+  P1 --> L3
+  L3 --> L4
+  D1 -.->|"索引可随时重建；正文丢了才是真丢"| D3
+      </div>
+      <details>
+        <summary>结构大纲（离线可读）</summary>
+        <pre>① 渲染层 src/renderer
+   views/      7 个页面：仪器盘 DashboardView、实验对比 CompareView、知识图谱 GraphView、
+               跨论文 SynthesisView、句式库 PhraseBankView、设置 SettingsView、引导 Onboarding
+   components/ 21 个组件，最大的三个：PdfReader 2031 行、PaperDetail 1180 行、PaperList 736 行
+   store/      4 个 zustand store：useAppStore（论文与设置）、chatStore（AI 问答留存）、
+               usePanelStore、useUiStore
+   lib/        pdf.ts（pdf.js 加载与抽行）· pdfText.ts · useHotkeys · useZoomGuard · utils
+
+② 桥
+   src/preload/index.ts  contextBridge 暴露白名单方法
+   src/shared/api.ts     57 个 IPC 频道 + 全部类型契约（三者对不上会被 tsc 拦住）
+   src/shared/*          另外 20 个共享模块：taxonomy 分类法 · pagination 分页 · highlights 高亮
+                         graph 图谱 · slides 幻灯 · quiz · phrases 句式 · autohighlight …
+
+③ 主进程 src/main（19 个模块 + agents/11 + lenses/14）
+   外壳    index.ts（窗口、visual zoom、菜单）· menu.ts · pdf-window.ts · runtime.ts
+   数据    vault.ts 605 行（Markdown 读写、路径校验）· db.ts 1049 行（sql.js 索引）
+           vault-service.ts（扫描/rescan）· settings.ts
+   业务    paper-service.ts · import-service.ts · graph.ts 596 行 · papertext.ts · arxiv.ts
+   AI      llm.ts 532 行 · ai-service.ts 1287 行 · agents/ 11 个 · lenses/ 11 个实现
+   任务    tasks.ts（全局队列 + 取消 + 进度）
+
+④ 磁盘（用户自选的知识库文件夹）
+   papers/*.md（事实来源）· figures/ · syntheses/ · .papervault/{index.sqlite, pdfs/, texts/}</pre>
+      </details>
+    </div>
+  </section>
+
+  <!-- ───────────────────────── ② 数据流 ───────────────────────── -->
+  <section>
+    <div class="sec-head"><span class="sec-num">02</span><h2>一次「AI 精读」的完整数据流</h2></div>
+    <p class="sec-sub">
+    这条链路是整个应用最核心的一条：AI 的产出永远先回到 Markdown，再由索引跟着更新。
+    注意「写回前重读磁盘」那一步 —— 它保证 AI 跑的一分钟里你在别处改的字不会被覆盖。
+    每一次模型调用还会记一笔账（模型 / 耗时 / token / 重试次数 / prompt 指纹），
+    随运行档案落盘 —— 失败的调用同样计入，因为它们一样计费。
+    </p>
+    <div class="card">
+      <div class="mermaid">
+sequenceDiagram
+  autonumber
+  actor U as 你
+  participant R as 渲染层
+  participant I as ipc.ts
+  participant T as tasks.ts 队列
+  participant A as ai-service + lens
+  participant L as llm.ts
+  participant V as vault.ts
+  participant D as db.ts 索引
+
+  U->>R: 点「AI 精读」
+  R->>I: ai:analyze
+  I->>T: 入队（顶部任务胶囊可见、可取消）
+  T->>A: 开始执行
+  A->>V: 读论文 Markdown + texts/ 原文
+  A->>A: 按维度拆成多次调用
+  loop 每个 lens（失败可单独重跑）
+    A->>L: prompt + 采样参数
+    L-->>A: 返回该维度的文本
+  end
+  A->>V: 写回章节
+  Note over A,V: 写前重读磁盘，只合并<br/>AI 真正产出的那几节<br/>—— 不会覆盖你手改的内容
+  V->>D: 更新索引（search_blob 等）
+  T-->>R: 进度与结果
+  R-->>U: 界面刷新，可复制 / 导出
+      </div>
+      <details>
+        <summary>结构大纲（离线可读）</summary>
+        <pre>你点「AI 精读」
+  → 渲染层发 ai:analyze
+  → tasks.ts 入队（顶部任务胶囊，可取消）
+  → ai-service 读 papers/*.md 的章节 + .papervault/texts/ 的原文
+  → 按维度（lens）拆成多次模型调用，每个 lens 独立 prompt / 采样参数 / 解析
+  → llm.ts 请求模型（Key 只存在本机设置里，不经过任何服务器）
+  → 结果写回 Markdown：**写前重读磁盘，只合并 AI 真正产出的那几节**
+  → db.ts 跟着更新索引（标题、分类、search_blob、关系……）
+  → 队列回报进度，界面刷新
+
+同样的形状还有：实验画像、写作手法、方法流程图、AI 标重点、段落改写、找关系、
+想法生成、组合分析、综述 —— 都是「读 Markdown → 多次调用 → 写回 Markdown → 更新索引」。</pre>
+      </details>
+    </div>
+  </section>
+
+  <!-- ───────────────────────── ③ AI 能力矩阵 ───────────────────────── -->
+  <section>
+    <div class="sec-head"><span class="sec-num">03</span><h2>AI 能力矩阵：谁读什么、写到哪</h2></div>
+    <p class="sec-sub">
+      11 个 agent 各自是一个文件（<code>src/main/agents/</code>），分别持有自己的 prompt、采样参数和解析逻辑。
+      这里最关键的一条：<b>关系类的产出只是「提议」，必须你确认才算数</b>。
+    </p>
+    <div class="card">
+      <div class="mermaid">
+flowchart LR
+  A1["papers/*.md<br/>结构化章节"]
+  A2[".papervault/texts/<br/>PDF 抽出的原文"]
+  A3["你已确认的论文关系"]
+
+  subgraph AG["11 个 agent"]
+    direction TB
+    B1["读正文的：<br/>精读 · 实验画像 · 写作手法<br/>方法流程图 · 综述"]
+    B2["读原文的：<br/>AI 标重点 · 问答 · 段落改写"]
+    B3["读关系的：<br/>找关系 · 研究想法 · 组合分析"]
+  end
+
+  C1["写回 Markdown 章节"]
+  C2["写进 syntheses/<br/>跨论文文档"]
+  C3["作为「提议」<br/>等你确认"]
+
+  A1 --> B1 --> C1
+  A1 --> B2
+  A2 --> B1
+  A2 --> B2 --> C1
+  A1 --> B3
+  A3 --> B3
+  A3 --> C2
+  B3 --> C2
+  B3 --> C3
+  C3 -.->|"采纳后才进关系图"| A3
+      </div>
+      <details>
+        <summary>结构大纲（离线可读）</summary>
+        <pre>输入有三种：论文的 Markdown 章节 / PDF 抽出的原文 / 你已确认的关系
+
+11 个 agent（src/main/agents/）
+  autohighlight.ts  AI 标重点 —— 模型只返回「行号区间」，文字与坐标由我们从原文回查
+  chat.ts           AI 问答 —— 带上下文的多轮对话
+  passage.ts        段落改写与讲解
+  rewrite.ts        重写某一节
+  quiz.ts           自测题
+  slides.ts         生成幻灯片
+  flow.ts           方法流程图
+  links.ts          找关系 —— 逐对判断，产出「提议」
+  ideas.ts          从已确认的关系生成研究想法
+  combo.ts          组合分析 —— 一组论文的空白点
+  synthesize.ts     套路归纳 / 综述
+
+14 个 lens（src/main/lenses/，11 个实现 + index/run/types）
+  overview · method · methodDetail · methodExample · experiment ·
+  connections · writing · english · limitations · visuals · graph
+
+产出落点
+  写回 Markdown 章节    精读、画像、手法、流程图、改写、标重点
+  写进 syntheses/       套路归纳、研究想法、组合分析
+  作为提议等确认        找关系（AI 只提议，采纳后才进你的关系图）</pre>
+      </details>
+    </div>
+  </section>
+
+  <!-- ───────────────────────── ④ 功能地图 ───────────────────────── -->
+  <section>
+    <div class="sec-head"><span class="sec-num">04</span><h2>功能地图：你点的地方 → 背后的模块</h2></div>
+    <p class="sec-sub">按界面功能对照代码，方便你（或者以后接手的人）直接找到该改哪一块。</p>
+    <div class="card">
+      <div class="mermaid">
+flowchart LR
+  subgraph UI["① 你面前的界面"]
+    direction TB
+    F1["论文库<br/>列表 · 搜索 · 标签筛选"]
+    F2["论文详情<br/>4 个标签页"]
+    F3["知识图谱"]
+    F4["跨论文"]
+    F5["实验对比"]
+    F6["句式库"]
+    F7["沉淀统计"]
+    F8["设置"]
+  end
+
+  subgraph BE["② 背后的模块"]
+    direction TB
+    G1["PaperList + papers:*<br/>索引里查，搜的是 search_blob"]
+    G2["PaperDetail + SectionEditor + PdfReader<br/>ExperimentProfilePanel + ChatPanel"]
+    G3["GraphView + GraphCanvas + graph.ts<br/>关系图 / 实体叠加 / 多跳检索"]
+    G4["SynthesisView<br/>归纳 · 想法 · 组合分析"]
+    G5["CompareView<br/>纯读索引聚合，不调 AI"]
+    G6["PhraseBankView + phrases.*"]
+    G7["DashboardView + stats.overview"]
+    G8["SettingsView + settings.ts<br/>模型与 API · 采样参数 · 单价<br/>分类体系 · 章节模板 · 维度开关"]
+  end
+
+  F1 --> G1
+  F2 --> G2
+  F3 --> G3
+  F4 --> G4
+  F5 --> G5
+  F6 --> G6
+  F7 --> G7
+  F8 --> G8
+      </div>
+      <details>
+        <summary>结构大纲（离线可读）</summary>
+        <pre>论文库        PaperList.tsx 736 行 + papers:list / papers:search（查索引的 search_blob）
+论文详情      PaperDetail.tsx 1180 行，四个标签：
+              结构化笔记   SectionEditor.tsx（分章节编辑，AI 写回的目标）
+              实验画像     ExperimentProfilePanel.tsx
+              原文         PdfReader.tsx 2031 行（pdf.js 自研渲染：虚拟滚动、文字层、
+                           高亮、标重点、按光标缩放、整页 / 适应宽度、独立窗口）
+              AI 问答      ChatPanel.tsx + chatStore.ts（多会话、历史、复制）
+              另有       PaperLinksPanel（关联论文）· FigureBoard（图库）· QuizPanel · SlideDeck
+知识图谱      GraphView.tsx 1254 行 + GraphCanvas.tsx + main/graph.ts 596 行
+跨论文        SynthesisView.tsx 804 行 → ai:synthesize / ideas / combo → syntheses/*.md
+实验对比      CompareView.tsx 809 行（13 列对比表，聚合索引数据，不调 AI）
+句式库        PhraseBankView.tsx + shared/phrases.ts
+沉淀统计      DashboardView.tsx + stats:overview
+设置          SettingsView.tsx 541 行 + main/settings.ts（存本机，不进仓库）</pre>
+      </details>
+    </div>
+  </section>
+
+  <!-- ───────────────────────── ⑤ 知识库目录 ───────────────────────── -->
+  <section>
+    <div class="sec-head"><span class="sec-num">05</span><h2>知识库目录：你的数据实际长这样</h2></div>
+    <p class="sec-sub">
+      这是应用之外、用任何编辑器都能改的普通文件夹。删掉 <code>.papervault/</code> 只是丢索引，
+      正文一个字都不会少 —— 重新打开应用会自己重建。
+    </p>
+    <div class="tree"><span class="d">你的知识库/</span>
+├── <span class="d">papers/</span>                 <span class="c">← 事实来源：一篇论文一个 .md</span>
+│   ├── <span class="f">GRASP-GRanularity-Aware-Search-Policy-xsb3mg.md</span>
+│   │     <span class="c">frontmatter：id / 标题 / 分类 / 标签 / 已确认关系 / 高亮 / 评分</span>
+│   │     <span class="c">正文：一句话总结 · 结构化笔记（分章节）· 实验画像 · 写作手法 …</span>
+│   └── <span class="f">…</span>
+├── <span class="d">figures/</span>                <span class="c">从原文里裁下来的图（每张一张图 + 一段说明）</span>
+├── <span class="d">syntheses/</span>              <span class="c">跨论文文档：套路归纳 / 研究想法 / 组合分析</span>
+└── <span class="d">.papervault/</span>            <span class="c">← 可丢弃的派生物</span>
+    ├── <span class="f">index.sqlite</span>         <span class="c">索引：列表、搜索、图谱、句式、阅读位置</span>
+    ├── <span class="d">pdfs/</span>               <span class="c">你导入的原始 PDF</span>
+    └── <span class="d">texts/</span>              <span class="c">从 PDF 抽出的纯文本（AI 标重点读它）</span>
+</div>
+  </section>
+
+  <!-- ───────────────────────── ⑥ 设计原则 ───────────────────────── -->
+  <section>
+    <div class="sec-head"><span class="sec-num">06</span><h2>七条设计原则（都带着「为什么」）</h2></div>
+    <p class="sec-sub">这些不是口号，每一条都写在代码注释里，是遇到具体问题时的取舍依据。</p>
+    <div class="principles">
+      <div class="p">
+        <h3>Markdown 是唯一事实来源</h3>
+        <p>正文只存在 <code>papers/*.md</code>，索引随时可从它重建。</p>
+        <span class="why">为什么：这样你可以用 iCloud / git 同步，也能用任何编辑器改；应用坏了不丢笔记。</span>
+      </div>
+      <div class="p">
+        <h3>索引进 Markdown，状态进索引</h3>
+        <p>AI 产出的正文写回 Markdown；搜索、图谱、阅读位置这类只进索引。</p>
+        <span class="why">为什么：笔记要可迁移，而阅读位置这类丢了无所谓的数据不该污染 frontmatter。</span>
+      </div>
+      <div class="p">
+        <h3>AI 只提议，人做决定</h3>
+        <p>找关系产出的是「待确认提议」，采纳后才进你的关系图。</p>
+        <span class="why">为什么：关系图的价值在于它是<strong>你判断过的</strong>；AI 自动连线会让它变成噪音。</span>
+      </div>
+      <div class="p">
+        <h3>AI 拆成独立 agent</h3>
+        <p>11 个 agent 各自持有 prompt、采样参数、解析与错误处理。</p>
+        <span class="why">为什么：某一节失败可以单独重跑，不用整篇重来；改一个不影响其它的。</span>
+      </div>
+      <div class="p">
+        <h3>渲染层碰不到磁盘</h3>
+        <p>所有文件与数据库操作都在主进程，经 57 个频道白名单通过。</p>
+        <span class="why">为什么：界面层出问题也动不了你的笔记；路径还要再经 <code>resolveInside</code> 校验，防止越出知识库。</span>
+      </div>
+      <div class="p">
+        <h3>写回前重读磁盘</h3>
+        <p>AI 收尾时重新读一遍文件，只合并它真正产出的那几节。</p>
+        <span class="why">为什么：一次精读要跑一两分钟，这期间你很可能在别的章节打字，整份覆盖会把它们抹掉。</span>
+      </div>
+      <div class="p">
+        <h3>每次 AI 调用都留痕</h3>
+        <p>模型、耗时、token、重试次数、system prompt 指纹，随该次运行的档案落进索引。</p>
+        <span class="why">为什么：改 prompt / 换模型之后，「是不是真的变好了」得有据可依。失败的调用也记 —— 它们一样计费。</span>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    PaperVault 系统流程图 · 按 <code>src/</code> 里实际存在的模块生成（107 文件 / 30,488 行 / 57 个 IPC 频道）。
+    图用 Mermaid 渲染；每节下面的「结构大纲」是同样内容的纯文本版。
+  </footer>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
+<script>
+  (function () {
+    if (!window.mermaid) {
+      document.body.classList.add('no-mermaid')
+      return
+    }
+    window.mermaid.initialize({
+      startOnLoad: true,
+      theme: 'base',
+      themeVariables: {
+        darkMode: true,
+        background: '#1b1b21',
+        primaryColor: '#262631',
+        primaryTextColor: '#e9e9ef',
+        primaryBorderColor: '#3c3c4c',
+        secondaryColor: '#22222b',
+        tertiaryColor: '#1b1b21',
+        lineColor: '#5c5c74',
+        textColor: '#c9c9d6',
+        mainBkg: '#262631',
+        nodeBorder: '#3c3c4c',
+        clusterBkg: '#191920',
+        clusterBorder: '#33333f',
+        titleColor: '#e9e9ef',
+        edgeLabelBackground: '#1b1b21',
+        actorBkg: '#262631',
+        actorBorder: '#3c3c4c',
+        actorTextColor: '#e9e9ef',
+        signalColor: '#8a8aa0',
+        signalTextColor: '#c9c9d6',
+        noteBkgColor: '#2a2a23',
+        noteTextColor: '#e8d9b0',
+        noteBorderColor: '#4a4432',
+        fontSize: '13px'
+      },
+      flowchart: { curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 52, useMaxWidth: true },
+      sequence: { useMaxWidth: true, actorMargin: 42, boxMargin: 8, noteMargin: 10, mirrorActors: false }
+    })
+  })()
+</script>
+</body>
+</html>

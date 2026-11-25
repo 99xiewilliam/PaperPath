@@ -48,7 +48,11 @@ export function ImportDialog(): JSX.Element {
       const known = new Set(prev.map((q) => q.path))
       const added = importPaths
         .filter((p) => !known.has(p))
-        .map((p) => ({ path: p, name: fileName(p), status: 'pending' as Status }))
+        .map((p) => ({
+          path: p,
+          name: fileName(p),
+          status: 'pending' as Status
+        }))
       return [...prev, ...added]
     })
     consumePaths()
@@ -72,7 +76,11 @@ export function ImportDialog(): JSX.Element {
         ...prev,
         ...paths
           .filter((p) => !known.has(p))
-          .map((p) => ({ path: p, name: fileName(p), status: 'pending' as Status }))
+          .map((p) => ({
+            path: p,
+            name: fileName(p),
+            status: 'pending' as Status
+          }))
       ]
     })
   }
@@ -89,14 +97,22 @@ export function ImportDialog(): JSX.Element {
 
     for (const item of targets) {
       try {
-        patch(item.path, { status: 'extracting', page: 0, total: 0, message: undefined })
+        patch(item.path, {
+          status: 'extracting',
+          page: 0,
+          total: 0,
+          message: undefined
+        })
         store.setBusy(`正在解析 ${item.name}…`)
         const bytes = await window.papervault.files.readBinary(item.path)
         const result = await extractPdfText(bytes, (done, total) =>
           patch(item.path, { page: done, total })
         )
 
-        patch(item.path, { status: 'importing', message: `抽取 ${result.text.length} 字` })
+        patch(item.path, {
+          status: 'importing',
+          message: `抽取 ${result.text.length} 字`
+        })
         if (autoSummarize) store.setBusy(`正在精读 ${item.name}…`)
         const res = await window.papervault.papers.importPdf({
           sourcePath: item.path,
@@ -119,7 +135,10 @@ export function ImportDialog(): JSX.Element {
           })
         } else {
           // 先取 message：那才是 queuedTask 写入的真实原因，error 只是兜底文案
-          patch(item.path, { status: 'failed', message: res.message ?? res.error ?? '导入失败' })
+          patch(item.path, {
+            status: 'failed',
+            message: res.message ?? res.error ?? '导入失败'
+          })
         }
       } catch (err) {
         patch(item.path, { status: 'failed', message: errorMessage(err) })
@@ -133,7 +152,10 @@ export function ImportDialog(): JSX.Element {
     if (lastId) await useAppStore.getState().selectPaper(lastId)
     useAppStore
       .getState()
-      .toast(ok ? `成功导入 ${ok} 篇论文` : '导入结束，但没有成功入库的论文', ok ? 'success' : 'error')
+      .toast(
+        ok ? `成功导入 ${ok} 篇论文` : '导入结束，但没有成功入库的论文',
+        ok ? 'success' : 'error'
+      )
     if (ok && queueRef.current.every((q) => q.status === 'done')) {
       setTimeout(() => {
         close('importOpen')
@@ -151,7 +173,7 @@ export function ImportDialog(): JSX.Element {
       width="max-w-3xl"
       footer={
         <>
-          <span className="mr-auto text-[11.5px] text-ink-low">
+          <span className="mr-auto text-meta text-ink-low">
             {queue.length ? `${queue.length} 个文件 · ${pendingCount} 个待处理` : ''}
           </span>
           <Button variant="ghost" onClick={() => close('importOpen')} disabled={running}>
@@ -178,8 +200,8 @@ export function ImportDialog(): JSX.Element {
           className="flex w-full flex-col items-center gap-1.5 rounded-xl border border-dashed border-line py-7 text-ink-mid transition hover:border-brand/50 hover:bg-brand/[0.04] hover:text-ink-high disabled:opacity-50"
         >
           <FolderOpen className="h-6 w-6" />
-          <span className="text-[12.5px] font-medium">点击选择 PDF，或直接把文件拖进窗口</span>
-          <span className="text-[11px] text-ink-low">支持一次选多篇，逐篇解析</span>
+          <span className="text-ui font-medium">点击选择 PDF，或直接把文件拖进窗口</span>
+          <span className="text-meta text-ink-low">支持一次选多篇，逐篇解析</span>
         </button>
 
         {queue.length ? (
@@ -191,8 +213,8 @@ export function ImportDialog(): JSX.Element {
               >
                 <FileText className="h-4 w-4 shrink-0 text-ink-low" />
                 <div className="min-w-0 flex-1">
-                  <div className="truncate text-[12px] text-ink-high">{item.name}</div>
-                  <div className="mt-0.5 flex items-center gap-2 text-[10.5px] text-ink-low">
+                  <div className="truncate text-ui text-ink-high">{item.name}</div>
+                  <div className="mt-0.5 flex items-center gap-2 text-caption text-ink-low">
                     <span
                       className={cn(
                         item.status === 'done' && 'text-ok',
@@ -233,8 +255,8 @@ export function ImportDialog(): JSX.Element {
 
         <div className="rounded-xl border border-line bg-bg-raised p-3">
           <div className="mb-2 flex items-center gap-2">
-            <span className="text-[12px] font-medium text-ink-mid">导入时预打的分类</span>
-            <span className="text-[10.5px] text-ink-low">
+            <span className="text-ui font-medium text-ink-mid">导入时预打的分类</span>
+            <span className="text-caption text-ink-low">
               留空则交给 AI 自动判断（可在笔记里随时改）
             </span>
           </div>
@@ -249,7 +271,10 @@ export function ImportDialog(): JSX.Element {
                       active ? prev.filter((c) => c !== node.id) : [...prev, node.id]
                     )
                   }
-                  className={cn('chip transition', active ? '' : 'text-ink-mid hover:border-strong')}
+                  className={cn(
+                    'chip transition',
+                    active ? '' : 'text-ink-mid hover:border-strong'
+                  )}
                   style={
                     active
                       ? {
@@ -275,20 +300,20 @@ export function ImportDialog(): JSX.Element {
             className="mt-0.5 h-3.5 w-3.5 accent-brand"
           />
           <span>
-            <span className="block text-[12px] font-medium text-ink-high">
-              导入后立即调用 AI 精读
-            </span>
-            <span className="mt-0.5 block text-[11px] leading-relaxed text-ink-low">
-              会逐篇请求模型，生成本次翻译好的写作手法与实验方法论拆解。模型：{settings.llm.model || '未配置'}
+            <span className="block text-ui font-medium text-ink-high">导入后立即调用 AI 精读</span>
+            <span className="mt-0.5 block text-meta leading-relaxed text-ink-low">
+              会逐篇请求模型，生成本次翻译好的写作手法与实验方法论拆解。模型：
+              {settings.llm.model || '未配置'}
               {settings.llm.apiKey ? '' : '（尚未配置 API Key，将跳过）'}
             </span>
           </span>
         </label>
 
         {!settings.llm.apiKey ? (
-          <div className="flex items-start gap-2 rounded-lg border border-warn/30 bg-warn/[0.07] px-3 py-2 text-[11.5px] text-warn">
+          <div className="flex items-start gap-2 rounded-lg border border-warn/30 bg-warn/[0.07] px-3 py-2 text-meta text-warn">
             <Plus className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-            还没有配置大模型 API Key，本次只会完成文本抽取与建档；配置后可以在笔记页点「AI 精读」补齐。
+            还没有配置大模型 API Key，本次只会完成文本抽取与建档；配置后可以在笔记页点「AI
+            精读」补齐。
           </div>
         ) : null}
       </div>

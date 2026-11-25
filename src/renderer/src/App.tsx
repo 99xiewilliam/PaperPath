@@ -16,15 +16,11 @@ import { BusyOverlay, Toaster } from '@/components/ui'
  * 非首屏视图按需加载：论文库是启动就用的，其余五个（尤其带着画布和
  * 表格逻辑的图谱 / 对比页）没必要打进首屏 bundle。
  */
+const WritingView = lazy(() =>
+  import('@/views/WritingView').then((m) => ({ default: m.WritingView }))
+)
 const CompareView = lazy(() =>
   import('@/views/CompareView').then((m) => ({ default: m.CompareView }))
-)
-const PhraseBankView = lazy(() =>
-  import('@/views/PhraseBankView').then((m) => ({ default: m.PhraseBankView }))
-)
-const GraphView = lazy(() => import('@/views/GraphView').then((m) => ({ default: m.GraphView })))
-const SynthesisView = lazy(() =>
-  import('@/views/SynthesisView').then((m) => ({ default: m.SynthesisView }))
 )
 const DashboardView = lazy(() =>
   import('@/views/DashboardView').then((m) => ({ default: m.DashboardView }))
@@ -58,7 +54,7 @@ export default function App(): JSX.Element {
 
   if (!ready) {
     return (
-      <div className="flex h-full items-center justify-center gap-2 text-[13px] text-ink-mid">
+      <div className="flex h-full items-center justify-center gap-2 text-body text-ink-mid">
         <Loader2 className="h-4 w-4 animate-spin text-brand-soft" />
         正在启动 PaperVault…
       </div>
@@ -107,10 +103,8 @@ export default function App(): JSX.Element {
             </>
           ) : (
             <Suspense fallback={<ViewLoading />}>
+              {view === 'writing' ? <WritingView /> : null}
               {view === 'compare' ? <CompareView /> : null}
-              {view === 'phrases' ? <PhraseBankView /> : null}
-              {view === 'graph' ? <GraphView /> : null}
-              {view === 'synthesis' ? <SynthesisView /> : null}
               {view === 'dashboard' ? <DashboardView /> : null}
               {view === 'settings' ? <SettingsView /> : null}
             </Suspense>
@@ -128,7 +122,7 @@ export default function App(): JSX.Element {
 
 function ViewLoading(): JSX.Element {
   return (
-    <div className="flex h-full flex-1 items-center justify-center gap-2 text-[12.5px] text-ink-low">
+    <div className="flex h-full flex-1 items-center justify-center gap-2 text-ui text-ink-low">
       <Loader2 className="h-4 w-4 animate-spin text-brand-soft" />
       加载中…
     </div>

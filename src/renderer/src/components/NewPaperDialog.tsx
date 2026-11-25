@@ -130,7 +130,13 @@ export function NewPaperDialog(): JSX.Element {
             variant="subtle"
             onClick={() => void fetchArxiv()}
             disabled={loadingArxiv || !arxivId.trim()}
-            icon={loadingArxiv ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+            icon={
+              loadingArxiv ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Download className="h-3.5 w-3.5" />
+              )
+            }
           >
             拉取
           </Button>
@@ -220,7 +226,10 @@ export function NewPaperDialog(): JSX.Element {
                     )
                   }
                   title={node.description}
-                  className={cn('chip transition', active ? '' : 'text-ink-mid hover:border-strong')}
+                  className={cn(
+                    'chip transition',
+                    active ? '' : 'text-ink-mid hover:border-strong'
+                  )}
                   style={
                     active
                       ? {

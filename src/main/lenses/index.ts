@@ -1,8 +1,8 @@
 import { LENS_META, type LensId } from '@shared/lenses'
 import { connectionsLens } from './connections'
+import { deepreadLens } from './deepread'
 import { englishLens } from './english'
 import { experimentLens } from './experiment'
-import { graphLens } from './graph'
 import { limitationsLens } from './limitations'
 import { methodLens } from './method'
 import { methodDetailLens } from './methodDetail'
@@ -11,6 +11,7 @@ import { overviewLens } from './overview'
 import type { Lens } from './types'
 import { visualsLens } from './visuals'
 import { writingLens, writingMethodLens } from './writing'
+import { writingLogicLens } from './writingLogic'
 
 /**
  * 所有分析维度。新增一个维度 = 新建一个文件 + 在这里注册 + 在 shared/lenses.ts
@@ -22,8 +23,10 @@ import { writingLens, writingMethodLens } from './writing'
  */
 const LENSES: Lens[] = [
   overviewLens,
+  deepreadLens,
   writingLens,
   writingMethodLens,
+  writingLogicLens,
   englishLens,
   visualsLens,
   methodDetailLens,
@@ -31,8 +34,7 @@ const LENSES: Lens[] = [
   connectionsLens,
   experimentLens,
   methodLens,
-  limitationsLens,
-  graphLens
+  limitationsLens
 ]
 
 const BY_ID = new Map(LENSES.map((l) => [l.id, l]))

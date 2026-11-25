@@ -12,11 +12,7 @@ export const PANEL_LIMITS = {
   /** 左侧导航栏。上限 320：再宽它的内容（导航 + 分类）就撑不满，右侧留白很难看 */
   sidebar: { min: 200, max: 320, default: 236 },
   /** 论文列表。下限 280 是「标题两行 + 元信息一行」的最小可读宽 */
-  list: { min: 280, max: 560, default: 352 },
-  /** 图谱页左栏（筛选）。内容是复选框列表，窄些也够 */
-  graphLeft: { min: 200, max: 360, default: 248 },
-  /** 图谱页右栏（详情 + 多跳）。要放 markdown 文本，下限比左栏高 */
-  graphRight: { min: 250, max: 480, default: 330 }
+  list: { min: 280, max: 560, default: 352 }
 } as const
 
 export type PanelId = keyof typeof PANEL_LIMITS

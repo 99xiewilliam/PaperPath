@@ -17,18 +17,12 @@ function edgePath(x1: number, y1: number, x2: number, y2: number): string {
  * 文字换行、圆角、配色全部交给 CSS 与主题，深色模式不用另写一套。
  * 布局是 shared/mindmap.ts 里的纯函数，这个组件只负责画。
  */
-export function MindMapCard({
-  map,
-  className
-}: {
-  map: MindMap
-  className?: string
-}): JSX.Element {
+export function MindMapCard({ map, className }: { map: MindMap; className?: string }): JSX.Element {
   const layout = useMemo(() => layoutMindMap(map), [map])
 
   return (
     <div className={cn('rounded-xl border border-line bg-bg-raised p-3', className)}>
-      <div className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-ink-low">
+      <div className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-meta text-ink-low">
         <Network className="h-3 w-3 shrink-0" />
         <span className="text-ink-mid">全文思维导图{map.title ? ` · ${map.title}` : ''}</span>
         {/* 同流程卡：必须写明这是重绘，初学者分不清「原文说的」和「模型画的」 */}
@@ -71,7 +65,7 @@ export function MindMapCard({
                   <>
                     <div className="font-medium text-ink-high">{node.label}</div>
                     {node.note ? (
-                      <div className="mt-1.5 text-[11.5px] text-ink-mid">{node.note}</div>
+                      <div className="mt-1.5 text-meta text-ink-mid">{node.note}</div>
                     ) : null}
                   </>
                 }
@@ -80,14 +74,14 @@ export function MindMapCard({
                   className={cn(
                     'line-clamp-2 leading-snug',
                     node.depth <= 1
-                      ? 'text-[11.5px] font-medium text-ink-high'
-                      : 'text-[11px] text-ink-mid'
+                      ? 'text-meta font-medium text-ink-high'
+                      : 'text-meta text-ink-mid'
                   )}
                 >
                   {node.label}
                 </div>
                 {node.note ? (
-                  <div className="mt-0.5 line-clamp-1 text-[10px] text-ink-low">{node.note}</div>
+                  <div className="mt-0.5 line-clamp-1 text-caption text-ink-low">{node.note}</div>
                 ) : null}
               </HoverTip>
             </foreignObject>

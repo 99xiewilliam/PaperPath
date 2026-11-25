@@ -4,7 +4,7 @@ import { join } from 'path'
 import { closeDatabase, openDatabase } from './db'
 import { registerIpc } from './ipc'
 import { installApplicationMenu } from './menu'
-import { envInfo, getSettings } from './settings'
+import { envInfo, getSettings, migrateSettings } from './settings'
 
 const isMac = process.platform === 'darwin'
 let mainWindow: BrowserWindow | null = null
@@ -63,7 +63,7 @@ function createWindow(): void {
     minWidth: Math.min(1120, workAreaSize.width),
     minHeight: Math.min(700, workAreaSize.height),
     show: false,
-    backgroundColor: '#0A0B0F',
+    backgroundColor: '#171217',
     ...(icon ? { icon } : {}),
     titleBarStyle: isMac ? 'hiddenInset' : 'default',
     trafficLightPosition: isMac ? { x: 16, y: 20 } : undefined,
@@ -131,6 +131,13 @@ async function bootstrap(): Promise<void> {
     console.log('[main] 已加载 .env:', env.files.join(', '))
     console.log('[main] 被环境变量接管的配置:', env.overridden.join(', ') || '(无)')
   }
+
+  /*
+   * 配置迁移必须在任何 getSettings() 之前：它改的是磁盘上那份 json，
+   * 晚于读取的话旧值已经被 readSettingsFile 缓存进内存，整个进程生命周期
+   * 都用不到新默认值（表现是「改了默认设置，重启也没生效」）。
+   */
+  migrateSettings()
 
   // 开发模式下 macOS 的 Dock 图标来自 Electron 自己，手动换掉才看得到真实效果
   if (isMac && !app.isPackaged) {

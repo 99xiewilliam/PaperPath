@@ -52,7 +52,10 @@ function loadFigureUrl(relPath: string): Promise<string | null> {
  * 按知识库内相对路径把图读成 blob URL。图库面板、归纳对照区共用这一份缓存，
  * 别处要用图也走这里，别再开一条自己的 IPC 读字节。
  */
-export function useFigureUrl(relPath: string | null): { url: string | null; failed: boolean } {
+export function useFigureUrl(relPath: string | null): {
+  url: string | null
+  failed: boolean
+} {
   const [url, setUrl] = useState<string | null>(() =>
     relPath ? (urlCache.get(relPath) ?? null) : null
   )
@@ -102,7 +105,7 @@ export function MdImage({
    * 和加载慢没区别，用户会一直等下去。
    */
   return (
-    <span className="my-2 inline-flex items-center gap-1.5 rounded-lg border border-line px-2.5 py-1.5 text-[11.5px] text-ink-low">
+    <span className="my-2 inline-flex items-center gap-1.5 rounded-lg border border-line px-2.5 py-1.5 text-meta text-ink-low">
       <ImageOff className="h-3.5 w-3.5 shrink-0" />
       {failed ? `图片找不到：${rel}` : '正在读取图片…'}
     </span>

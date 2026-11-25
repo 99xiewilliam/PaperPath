@@ -14,10 +14,9 @@
     "build": "electron-vite build",
     "preview": "electron-vite preview",
     "typecheck": "tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.web.json --noEmit && tsc -p tsconfig.scripts.json --noEmit",
-    "verify": "npm run typecheck && npm run build && npm run smoke:db && npm run smoke:graph && npm run smoke:search && npm run smoke:parse && npm run smoke:sections && npm run smoke:stream && npm run smoke:tasks && npm run smoke:ipc && npm run smoke:menu && npm run smoke:pagination && npm run smoke:learning",
+    "verify": "npm run typecheck && npm run build && npm run smoke:db && npm run smoke:search && npm run smoke:parse && npm run smoke:sections && npm run smoke:stream && npm run smoke:tasks && npm run smoke:ipc && npm run smoke:menu && npm run smoke:pagination && npm run smoke:learning && npm run smoke:usage && npm run smoke:experiment && npm run smoke:phrases && npm run smoke:writing",
     "inspect:pdf": "esbuild src/renderer/src/lib/pdfText.ts --bundle --platform=node --format=cjs --outfile=.pv-inspect/pdfText.cjs --log-level=warning && esbuild src/main/papertext.ts --bundle --platform=node --format=cjs --outfile=.pv-inspect/papertext.cjs --log-level=warning && node scripts/inspect-pdf.cjs",
     "smoke:ai": "esbuild scripts/smoke-ai.ts --bundle --platform=node --format=cjs --outfile=.pv-inspect/smoke-ai.cjs --alias:@shared=./src/shared --external:electron --external:pdfjs-dist --log-level=warning && node .pv-inspect/smoke-ai.cjs",
-    "smoke:graph": "esbuild scripts/smoke-graph.ts --bundle --platform=node --format=cjs --outfile=.pv-inspect/smoke-graph.cjs --alias:@shared=./src/shared --external:electron --external:sql.js --log-level=warning && node .pv-inspect/smoke-graph.cjs",
     "smoke:db": "esbuild scripts/smoke-db.ts --bundle --platform=node --format=cjs --outfile=.pv-inspect/smoke-db.cjs --alias:@shared=./src/shared --external:electron --external:sql.js --log-level=warning && node .pv-inspect/smoke-db.cjs",
     "smoke:tasks": "esbuild scripts/smoke-tasks.ts --bundle --platform=node --format=cjs --outfile=.pv-inspect/smoke-tasks.cjs --alias:@shared=./src/shared --external:electron --external:sql.js --log-level=warning && node .pv-inspect/smoke-tasks.cjs",
     "smoke:ipc": "esbuild scripts/smoke-ipc.ts --bundle --platform=node --format=cjs --outfile=.pv-inspect/smoke-ipc.cjs --alias:@shared=./src/shared --alias:electron=./scripts/stubs/electron.ts --external:sql.js --log-level=warning && node .pv-inspect/smoke-ipc.cjs",
@@ -31,7 +30,12 @@
     "icon:build": "esbuild scripts/make-icon.ts --bundle --platform=node --format=cjs --outfile=.pv-inspect/make-icon.cjs --external:electron --log-level=warning && node .pv-inspect/make-icon.cjs",
     "dist:mac": "npm run icon:build && npm run build && electron-builder --mac",
     "dist:win": "npm run icon:build && npm run build && electron-builder --win",
-    "smoke:learning": "esbuild scripts/smoke-learning.ts --bundle --platform=node --format=cjs --outfile=.pv-inspect/smoke-learning.cjs --alias:@shared=./src/shared --alias:electron=./scripts/stubs/electron.ts --external:sql.js --log-level=warning && node .pv-inspect/smoke-learning.cjs"
+    "smoke:learning": "esbuild scripts/smoke-learning.ts --bundle --platform=node --format=cjs --outfile=.pv-inspect/smoke-learning.cjs --alias:@shared=./src/shared --alias:electron=./scripts/stubs/electron.ts --external:sql.js --log-level=warning && node .pv-inspect/smoke-learning.cjs",
+    "smoke:usage": "esbuild scripts/smoke-usage.ts --bundle --platform=node --format=cjs --outfile=.pv-inspect/smoke-usage.cjs --alias:@shared=./src/shared --external:electron --log-level=warning && node .pv-inspect/smoke-usage.cjs",
+    "smoke:phrases": "esbuild scripts/smoke-phrases.ts --bundle --platform=node --format=cjs --outfile=.pv-inspect/smoke-phrases.cjs --alias:@shared=./src/shared --external:electron --log-level=warning && node .pv-inspect/smoke-phrases.cjs",
+    "smoke:writing": "esbuild scripts/smoke-writing.ts --bundle --platform=node --format=cjs --outfile=.pv-inspect/smoke-writing.cjs --alias:@shared=./src/shared --external:electron --log-level=warning && node .pv-inspect/smoke-writing.cjs",
+    "smoke:experiment": "esbuild scripts/smoke-experiment.ts --bundle --platform=node --format=cjs --outfile=.pv-inspect/smoke-experiment.cjs --alias:@shared=./src/shared --external:electron --log-level=warning && node .pv-inspect/smoke-experiment.cjs",
+    "migrate:graph": "esbuild scripts/migrate-graph.ts --bundle --platform=node --format=cjs --outfile=.pv-inspect/migrate-graph.cjs --alias:@shared=./src/shared --external:electron --external:sql.js --log-level=warning && node .pv-inspect/migrate-graph.cjs"
   },
   "build": {
     "appId": "com.papervault.app",

@@ -257,6 +257,32 @@ async function main(): Promise<void> {
   check('交互任务的信号确实被 abort', (await cancelMe) === true)
   check('取消后计数归零', activeInteractiveCount() === 0)
 
+  /*
+   * 按标识取消：演示生成这类长任务必须能**只掐自己那一个** ——
+   * 用户点它的取消按钮时，旁边正在跑的划词翻译不该跟着挂。
+   * 放两个任务（一个带标识、一个不带）来锁死这条语义。
+   */
+  const waitAbort = (signal: AbortSignal): Promise<boolean> =>
+    new Promise((resolve) => {
+      if (signal.aborted) return resolve(true)
+      signal.addEventListener('abort', () => resolve(true), { once: true })
+      // 兜底：没被取消的话 200ms 后按「活下来了」结算 —— 否则 await 会一直挂着
+      setTimeout(() => resolve(signal.aborted), 200)
+    })
+  const slides = runInteractive(waitAbort, 'slides')
+  const translate = runInteractive(waitAbort)
+  await sleep(5)
+  check('按标识取消只命中带该标识的任务', cancelInteractive('slides') === 1)
+  check('带标识的那个确实被 abort', (await slides) === true)
+  check(
+    '不带标识的任务没被牵连',
+    activeInteractiveCount() === 1,
+    `count=${activeInteractiveCount()}`
+  )
+  check('不带标识的任务照常跑完', (await translate) === false, '它不该被 abort')
+  cancelInteractive()
+  check('取消全部后归零', activeInteractiveCount() === 0)
+
   console.log('')
   console.log(`${pass}/${pass + fail} 通过`)
   if (fail) process.exitCode = 1

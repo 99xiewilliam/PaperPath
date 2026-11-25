@@ -1,6 +1,6 @@
 import { coerceSectionText, SECTION_SPECS } from '@shared/template'
 import type { LensId, LensMeta } from '@shared/lenses'
-import type { RelatedPaper } from '@shared/connections'
+import type { ReadingSkill } from '@shared/reading-skill'
 import type { ExperimentProfile } from '@shared/experiment'
 import type { PaperMeta, TaxonomyNode } from '@shared/types'
 import type { LlmSource } from '../papertext'
@@ -41,13 +41,8 @@ export interface LensContext {
   exp?: ExperimentProfile
   /** 已有英语短语（用于去重） */
   existingPhrases?: { text: string }[]
-  /**
-   * 库里与本篇**真正共享技术要素**的其他论文（见 shared/connections.ts）。
-   *
-   * 只有「方法串联」维度会读它。空数组表示没筛出真正相关的论文 —— 那是合法结论，
-   * 该维度会据此写「库内暂无与本篇真正可串联的论文」，而不是硬拉关系。
-   */
-  relatedPapers?: RelatedPaper[]
+  /** 用户的读论文风格；缺省时用内置默认 */
+  skill?: ReadingSkill
 }
 
 /**
@@ -91,6 +86,11 @@ export interface Lens {
   id: LensId
   meta: LensMeta
   system: string
+  /**
+   * 是否把用户的「口吻」拼进 system prompt。默认拼；
+   * 只做结构化抽取的维度关掉 —— 它们的输出给机器读，口吻只会干扰字段的忠实度。
+   */
+  voice?: false
   prompt(ctx: LensContext): string
   parse(payload: unknown, ctx: LensContext): LensOutput
 }
@@ -381,12 +381,28 @@ export function sectionRequirements(keys: string[]): string {
     .join('\n')
 }
 
+/**
+ * 维度实际发出去的 system prompt：维度自己的角色设定 + 用户的口吻。
+ * 口吻放在后面并声明「格式仍以任务要求为准」，免得「多用小标题」之类的风格偏好
+ * 压过「值里不要写 ## 标题」这种会弄坏笔记的硬约束。
+ */
+export function lensSystemPrompt(lens: Lens, ctx: LensContext): string {
+  const voice = lens.voice === false ? '' : ctx.skill?.voice.trim()
+  if (!voice) return lens.system
+  return `${lens.system}
+
+# 用户的读论文风格（讲解的口吻与分析习惯照这个来；输出格式、字段与「不编造」的要求仍以任务说明为准）
+${voice}`
+}
+
 /** 通用的 JSON 输出约束说明，拼进每个维度的 prompt */
 export function jsonOnlyRule(): string {
   return [
     '# 输出要求',
     '- 只输出一个合法的 JSON 对象，不要 markdown 代码块包裹，不要任何解释性文字。',
     '- 所有字符串值都使用 Markdown 片段（列表、加粗标签），便于直接贴进笔记。',
+    '- **字符串值内部不要出现任何以 # 开头的标题行**（如「## 小标题」）：笔记按二级标题分节，',
+    '  值里的标题行会把整节内容切成碎片。要分点就用 `- **加粗标签**：` 的列表形式。',
     '- 原文没有提到的信息写「原文未说明」，不要推测或编造。'
   ].join('\n')
 }

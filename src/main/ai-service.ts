@@ -1,10 +1,10 @@
 /**
- * AI 能力层：精读（多维度）、章节重写、划词、知识库问答、套路归纳。
+ * AI 能力层：精读（多维度）、章节重写、划词、标重点、知识库问答。
  *
  * 解耦约定：**每个 AI 功能一个 agent，一个文件**，自己的 system prompt、
  * 自己的 user prompt、自己的采样参数、自己的输出解析：
  *   - 精读的分析维度（一个维度一次调用）在 ./lenses/
- *   - 其余一次性功能（出题 / 标重点 / 划词 / 重写 / 问答 / 套路归纳）在 ./agents/
+ *   - 其余一次性功能（标重点 / 划词 / 重写 / 问答）在 ./agents/
  * 本文件只管编排：取原文与笔记、调对应的 agent、把产出落盘。
  *
  * 另一件事需要注意：**本模块不做任务队列包装**。
@@ -15,7 +15,6 @@
 import { mkdirSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import matter from 'gray-matter'
-import { relatedPapersFrom } from '@shared/connections'
 import {
   buildAiHighlights,
   extractHeadingTitles,
@@ -24,53 +23,24 @@ import {
 } from '@shared/autohighlight'
 import { emptyExperimentProfile, hasProfile } from '@shared/experiment'
 import type { Highlight } from '@shared/highlights'
-import { enabledLensIds, lensForSection, type LensId } from '@shared/lenses'
-import {
-  collectComboRelations,
-  computeComboSignals,
-  renderComboDoc,
-  MAX_COMBO_PAPERS,
-  MIN_COMBO_PAPERS,
-  type ComboPaper
-} from '@shared/combo'
-import {
-  buildIdeaSeeds,
-  renderIdeaDoc,
-  type Idea,
-  type IdeaDocInput,
-  type IdeaSeedPaper
-} from '@shared/ideas'
-import { LINK_TYPE_LABEL, normalizeLinks, type PaperLink } from '@shared/links'
+import { enabledLensIds, lensForSection, lensMeta, type LensId } from '@shared/lenses'
 import { scanFigureReferences, type FigureReference } from '@shared/figures'
-import {
-  ensureVisualSlides,
-  pruneSlideVisuals,
-  SLIDE_DECK_REVISION,
-  type SlideDeck
-} from '@shared/slides'
+import { parseReadingSkill } from '@shared/reading-skill'
 import { extractTldr } from '@shared/template'
-import type { Quiz } from '@shared/quiz'
+import type { AiTaskResult, ChatMessage, PaperMeta, PaperSummary } from '@shared/types'
 import type {
-  AiTaskResult,
-  ChatMessage,
-  LinkDiscoveryResult,
-  PaperMeta,
-  PaperSummary,
-  SynthesisScope,
-  SynthesisScopeInput
-} from '@shared/types'
-import type { AiTextResult, BulkResult, PassageAskMode } from '@shared/api'
+  AiTextResult,
+  BulkResult,
+  ChatOptions,
+  ChatResult,
+  ChatScope,
+  PassageAskMode
+} from '@shared/api'
 import { runAutoHighlightAgents } from './agents/autohighlight'
-import { runChatAgent } from './agents/chat'
-import { runComboAgent } from './agents/combo'
-import { runMethodFlowAgent } from './agents/flow'
-import { runIdeaAgent } from './agents/ideas'
-import { pickLinkDigest, runLinkJudgeAgent, verdictToLink } from './agents/links'
+import { ChatTurnError, runChatAgent, type ChatAgentPaper } from './agents/chat'
+import { chatTools } from './chat-tools'
 import { runPassageAgent } from './agents/passage'
-import { runQuizAgent } from './agents/quiz'
 import { runRewriteAgent } from './agents/rewrite'
-import { buildSlideNotesBlock, runSlideDeckAgent } from './agents/slides'
-import { runSynthesizeAgent, type SynthesizeInput } from './agents/synthesize'
 import * as db from './db'
 import { resolveLenses } from './lenses'
 import {
@@ -89,6 +59,7 @@ import {
   CHAT_CONTEXT_BUDGET,
   describeTaskError,
   emitStreamDelta,
+  emitStreamStatus,
   LENS_SOURCE_LIMIT,
   relativeOf,
   requireVault
@@ -96,6 +67,8 @@ import {
 import { getSettings } from './settings'
 import { currentSignal, emitProgress, TaskCancelledError } from './tasks'
 import * as vault from './vault'
+
+const DEEPREAD_SECTION = lensMeta('deepread').sections[0]
 
 /* ------------------------------------------------------------------ */
 /*  精读：按维度拆成多次调用                                             */
@@ -121,14 +94,7 @@ export function buildLensContext(vaultPath: string, paperId: string, meta: Paper
     ),
     exp: meta.exp,
     existingPhrases: meta.phrases,
-    /*
-     * 跨论文候选，只给「方法串联」维度用。
-     *
-     * 判定放在这里而不是 prompt 里：**关系要由数据说了算**。把一堆论文标题交给模型，
-     * 它几乎总能写出「都关注 XX」这种正确但无用的关联。所以先用知识图谱按共享实体
-     * 筛一遍，筛不出就传空数组 —— 那个维度会如实写「库内暂无可串联的论文」。
-     */
-    relatedPapers: relatedPapersFrom(paperId, db.listPaperRows())
+    skill: parseReadingSkill(vault.readReadingSkill(vaultPath))
   }
 }
 
@@ -170,7 +136,12 @@ async function runLensesInner(
 
   if (!resolveLenses(lensIds).length) {
     return {
-      result: { ok: false, message: '没有启用任何分析维度，请到「设置 → 分析维度」里勾选。' },
+      result: {
+        ok: false,
+        message: lensIds.length
+          ? `这些分析维度已经下线，无需重跑：${lensIds.join('、')}`
+          : '没有启用任何分析维度，请到「设置 → 分析维度」里勾选。'
+      },
       outcomes: []
     }
   }
@@ -231,6 +202,8 @@ async function runLensesInner(
     exp: (run.data.exp as PaperMeta['exp']) ?? freshMeta.exp,
     phrases: (run.data.phrases as PaperMeta['phrases']) ?? freshMeta.phrases,
     graph: (run.data.graph as PaperMeta['graph']) ?? freshMeta.graph,
+    // 同理：这一次没跑写作逻辑卡就沿用旧的，不要让一次局部重跑把它清空
+    wlogic: (run.data.wlogic as PaperMeta['wlogic']) ?? freshMeta.wlogic,
     // 这次没产出流程图 / 思维导图就沿用旧的（`freshMeta` 里没有，落盘时会从磁盘取回）
     flow: (run.data.flow as PaperMeta['flow']) ?? freshMeta.flow,
     mindmap: (run.data.mindmap as PaperMeta['mindmap']) ?? freshMeta.mindmap
@@ -328,7 +301,10 @@ export async function runBuildProfiles(ids: string[] | 'missing'): Promise<BulkR
   requireVault()
   const targets =
     ids === 'missing'
-      ? db.listPaperRows().filter((p) => !hasProfile(p.exp)).map((p) => p.id)
+      ? db
+          .listPaperRows()
+          .filter((p) => !hasProfile(p.exp))
+          .map((p) => p.id)
       : ids.filter(Boolean)
 
   if (!targets.length) {
@@ -438,8 +414,13 @@ export async function runRewriteSection(
   )
   if (!content) throw new Error('模型没有返回可用内容，请重试。')
 
-  const nextSections = { ...sections, [sectionKey]: content }
-  persistPaper(meta, nextSections)
+  /*
+   * 写回前重读磁盘：这次改写要跑十几秒到一分钟，用户很可能已经在**别的章节**里
+   * 写了字 —— 拿开始时的快照整份覆盖会把那些改动一起抹掉。只把这次产出的那一节
+   * 写进去（精读那条路就是这么做的，见 runAnalyze 里对 onDisk 的处理）。
+   */
+  const onDisk = sectionsOf(paperId)
+  persistPaper(meta, { ...onDisk, [sectionKey]: content })
   return { ok: true, content }
 }
 
@@ -562,721 +543,73 @@ export async function runAutoHighlight(
 }
 
 /* ------------------------------------------------------------------ */
-/*  「考考我」理解力自测                                                  */
-/* ------------------------------------------------------------------ */
-
-/**
- * 出一套阅读理解式的自测题，检验读者是不是真读懂了。
- *
- * 判分不在这里做（gradeQuiz 是渲染层的纯函数，对答案不烧模型调用）；
- * 解析在出题时一并生成。出过的题落进 frontmatter —— 隔几天再测一次
- * 才是复习，每次重测都重新出题就成了烧 token 的机器。
- */
-export async function runQuiz(
-  paperId: string,
-  signal?: AbortSignal
-): Promise<{ ok: boolean; quiz?: Quiz; message?: string }> {
-  const settings = getSettings()
-  const row = db.getPaperRow(paperId)
-  if (!row) return { ok: false, message: '论文不存在。' }
-  const meta = db.paperMetaFromRow(row)
-
-  const ctx = buildLensContext(requireVault(), paperId, meta)
-  if (!ctx.fullText && !Object.keys(ctx.sourceSections).length) {
-    return { ok: false, message: '这篇论文没有抽取到原文，无法出题。请先导入 PDF。' }
-  }
-
-  const quiz = await runQuizAgent(
-    {
-      title: meta.title,
-      sourceText: sourceBlock(
-        ctx,
-        ['Abstract', 'Introduction', 'Method', 'Methodology', 'Experiments', 'Conclusion', 'Discussion'],
-        { tail: 8000 }
-      )
-    },
-    settings.llm,
-    { signal }
-  )
-  if (!quiz) {
-    // 有效题不足 → 报错重试，不拿残题覆盖掉已有的题
-    return { ok: false, message: '模型出的题不合格（有效题目不足 3 道），可稍后重试。' }
-  }
-
-  const detail = persistPaper({ ...meta, quiz }, sectionsOf(paperId))
-  return { ok: true, quiz: detail.meta.quiz }
-}
-
-/* ------------------------------------------------------------------ */
-/*  演示文稿（讲给没读过这篇论文的人）                                     */
-/* ------------------------------------------------------------------ */
-
-/**
- * 把论文拆成一页页，讲给没读过它的人听。
- *
- * 和 quiz 一样是一次「点了在等」的调用：产出落进 frontmatter 的 `slides` 键，
- * 只有重新生成才会再调一次模型。
- *
- * 投喂的章节比 quiz 广一点：演示要从「为什么值得听」一路讲到「凭什么可信」，
- * 少了 Related Work（别人差在哪）和 Discussion / Limitations（边界在哪）就讲不圆。
- *
- * 生成分两步（一个产物一个 agent）：笔记里还没有流程图时，先让 agents/flow.ts
- * 照原文画一张并落进 frontmatter，再让讲稿 agent 引用它。流程图画不出来
- * （纯理论 / 综述论文）或画失败了，讲稿照常生成 —— 思维导图兜底还在。
- */
-export async function runSlideDeck(
-  paperId: string,
-  signal?: AbortSignal
-): Promise<{ ok: boolean; deck?: SlideDeck; message?: string }> {
-  const settings = getSettings()
-  const row = db.getPaperRow(paperId)
-  if (!row) return { ok: false, message: '论文不存在。' }
-  const meta = db.paperMetaFromRow(row)
-
-  const vaultPath = requireVault()
-  const ctx = buildLensContext(vaultPath, paperId, meta)
-  if (!ctx.fullText && !Object.keys(ctx.sourceSections).length) {
-    return { ok: false, message: '这篇论文没有抽取到原文，无法生成演示。请先导入 PDF。' }
-  }
-
-  /*
-   * 「手上有什么画面道具」必须看**磁盘上的笔记**：flow / mindmap / slides 都只存
-   * frontmatter，索引行里没有这几个键（paperMetaFromRow 构造出的 meta 上恒为
-   * undefined）。上一版在这里读了索引行，于是模型被亲口告知「没有思维导图，
-   * 不要用 mindmap」、兜底也永远不触发 —— frontmatter 里明明有 mindmap 的论文
-   * 照样生成出纯文字演示。同一种坑在 highlights 上踩过一次（见 db.ts migrate）。
-   */
-  const noteFile = vault.readPaperFileById(
-    vaultPath,
-    paperId,
-    row ? String(row.rel_path ?? '') : undefined
-  )
-  const sections = noteFile?.sections ?? sectionsOf(paperId)
-  const mindmap = noteFile?.meta.mindmap
-  let flow = noteFile?.meta.flow
-
-  // 第一步：没有流程图就先照原文画一张（独立调用、独立校验、独立落盘）
-  if (!flow) {
-    emitProgress('slides', '先照原文画方法流程图…', paperId)
-    try {
-      flow = await runMethodFlowAgent(
-        {
-          title: meta.title,
-          sourceText: sourceBlock(
-            ctx,
-            ['Method', 'Methodology', 'Approach', 'Preliminaries', 'Abstract', 'Introduction'],
-            { tail: 12000 }
-          )
-        },
-        settings.llm,
-        { signal }
-      )
-    } catch (err) {
-      // 用户取消要如实中断；其他失败只丢流程图这一块，讲稿继续（思维导图兜底还在）
-      if (err instanceof LlmError && err.cancelled) throw err
-    }
-  }
-  emitProgress('slides', flow ? '流程图就绪，组织讲稿…' : '组织讲稿…', paperId)
-
-  /*
-   * 原文图要连「出现在哪一节、前后写了什么」一起给：模型看不到图本身，
-   * 那是它判断这张图画什么的唯一线索（见 shared/figures.scanFigureReferences）。
-   * 没被任何笔记引用过的图也列上，只是不带线索，让模型自己决定要不要用。
-   */
-  const referenced = scanFigureReferences(sections)
-  const known = new Set(referenced.map((r) => r.relPath))
-  const figures: FigureReference[] = [
-    ...referenced,
-    ...vault
-      .listFigures(vaultPath, paperId)
-      .filter((rel) => !known.has(rel))
-      .map((rel) => ({ relPath: rel, section: '', excerpt: '' }))
-  ]
-
-  const deck = await runSlideDeckAgent(
-    {
-      title: meta.title,
-      year: meta.year,
-      venue: meta.venue,
-      // 分类存的是 id（rag / vla…），喂给模型要换成中文名，否则它会当成缩写乱猜
-      categories: categoriesForAi()
-        .filter((c) => meta.categories.includes(c.id))
-        .map((c) => c.label),
-      sourceText: sourceBlock(
-        ctx,
-        [
-          'Abstract',
-          'Introduction',
-          'Related Work',
-          'Method',
-          'Methodology',
-          'Experiments',
-          'Analysis',
-          'Conclusion',
-          'Discussion',
-          'Limitations'
-        ],
-        { tail: 8000 }
-      ),
-      // 笔记里的「具体例子 / 方法细节」是写 example 页最好的材料
-      noteExcerpt: buildSlideNotesBlock(sections),
-      stage: { hasFlow: Boolean(flow), hasMindmap: Boolean(mindmap), figures }
-    },
-    settings.llm,
-    { signal }
-  )
-  if (!deck) {
-    // 有效页数不足 → 报错重试，不拿残稿覆盖掉已有的演示
-    return { ok: false, message: '模型给的页数不够（不足 4 页），可稍后重试。' }
-  }
-
-  const available = {
-    flow: Boolean(flow),
-    mindmap: Boolean(mindmap),
-    figures: figures.map((f) => f.relPath)
-  }
-  /*
-   * 顺序不能反：先降级「库里没有画面」的页，再兜底补画面。
-   * 反过来的话，刚补上的那一页会被降级逻辑当成「模型给的」再检查一遍，
-   * 虽然结果一样，但语义会变得难读 —— 兜底补的页不该再被质疑。
-   */
-  const staged = ensureVisualSlides(pruneSlideVisuals(deck, available), available)
-  /*
-   * 盖版本号：界面靠它判断「手里这份是不是旧版生成的」（见 SLIDE_DECK_REVISION）。
-   * 第一步画出的流程图一起落盘 —— 它是论文的产物，不止这一份讲稿在用；
-   * 画不出来（undefined）时 writePaperFile 会保留磁盘上已有的那张（如果有）。
-   */
-  const detail = persistPaper(
-    {
-      ...meta,
-      ...(flow ? { flow } : {}),
-      slides: { ...staged, revision: SLIDE_DECK_REVISION }
-    },
-    sections
-  )
-  return { ok: true, deck: detail.meta.slides }
-}
-
-/* ------------------------------------------------------------------ */
 /*  知识库问答                                                           */
 /* ------------------------------------------------------------------ */
 
 export async function runChat(
   paperIds: string[],
-  messages: ChatMessage[]
-): Promise<{ ok: boolean; content: string }> {
+  messages: ChatMessage[],
+  scope?: ChatScope,
+  options: ChatOptions = {},
+  /** 交互通道自己的信号（理由同 runPassage） */
+  signal?: AbortSignal
+): Promise<ChatResult> {
   const settings = getSettings()
   if (!messages.length) throw new Error('消息为空。')
 
-  const picked: { title: string; year: number | null; categories: string[]; sections: Record<string, string> }[] =
-    []
+  const picked: ChatAgentPaper[] = []
+  /** 笔记太长、这次没放进上下文的论文标题 */
+  const omitted: string[] = []
   let budget = CHAT_CONTEXT_BUDGET
   for (const id of paperIds) {
     const summary = db.getPaperSummary(id)
     if (!summary) continue
     const sections = sectionsOf(id)
-    const weight = JSON.stringify(sections).length
-    if (budget - weight < 0 && picked.length) break
+    // 导读是其余章节的长篇复述：单篇问答时它最好读，多篇时只会挤掉别的论文
+    if (paperIds.length > 1) delete sections[DEEPREAD_SECTION]
+    const thoughts = highlightsOf(id)
+      .filter((h) => !h.ai && h.note)
+      .map((h) => `- P${h.page}「${h.text.slice(0, 160)}」→ ${h.note}`)
+    const weight = JSON.stringify(sections).length + thoughts.join('\n').length
+    if (budget - weight < 0 && picked.length) {
+      omitted.push(summary.title)
+      continue
+    }
     budget -= weight
     picked.push({
+      id,
       title: summary.title,
       year: summary.year,
       categories: summary.categories,
-      sections
+      sections,
+      thoughts
     })
   }
 
-  const content = await runChatAgent({ papers: picked, messages }, settings.llm)
-  return { ok: true, content }
-}
-
-/* ------------------------------------------------------------------ */
-/*  套路归纳                                                            */
-/* ------------------------------------------------------------------ */
-
-export function resolveScopePapers(input: SynthesisScopeInput): PaperSummary[] {
-  const all = db.listPaperRows()
-  if (input.type === 'category') {
-    return all.filter((p) => p.categories.includes(input.value))
+  const streamId = options.streamId
+  const call = {
+    signal,
+    onDelta: streamId ? (delta: string) => emitStreamDelta(streamId, delta) : undefined,
+    onStatus: streamId ? (status: string) => emitStreamStatus(streamId, status) : undefined
   }
-  if (input.type === 'tag') {
-    return all.filter((p) => p.tags.includes(input.value))
-  }
-  const ids = new Set(input.paperIds ?? [])
-  return all.filter((p) => ids.has(p.id))
-}
-
-export async function runSynthesize(input: SynthesisScopeInput): Promise<AiTaskResult> {
-  const vaultPath = requireVault()
-  const settings = getSettings()
-  const papers = resolveScopePapers(input)
-  if (papers.length < 2) {
-    throw new Error('至少需要 2 篇论文才能做套路归纳，请先往这个分类里补几篇。')
-  }
-
-  const catalog = categoriesForAi()
-  let label = input.value
-  if (input.type === 'category') {
-    label = catalog.find((c) => c.id === input.value)?.label ?? input.value
-  } else if (input.type === 'tag') {
-    label = `标签「${input.value}」`
-  } else {
-    label = `选定的 ${papers.length} 篇论文`
-  }
-
-  emitProgress('synthesize', `正在归纳「${label}」的 ${papers.length} 篇论文…`)
-
-  const payload: SynthesizeInput['papers'] = papers.slice(0, 40).map((p) => ({
-    title: p.title,
-    year: p.year,
-    venue: p.venue,
-    sections: vault.readPaperSections(vaultPath, p.id, p.relPath)
-  }))
-
-  const content = await runSynthesizeAgent(
-    {
-      scopeLabel: label,
-      scopeType: input.type,
-      focus: input.focus,
-      papers: payload
-    },
-    settings.llm
-  )
-  const title = `${label} · 套路归纳`
-  const id = `synthesis-${vault.slugify(label)}-${Math.random().toString(36).slice(2, 7)}`
-  const now = new Date().toISOString()
-
-  const dir = join(vaultPath, vault.VAULT_DIRS.syntheses)
-  mkdirSync(dir, { recursive: true })
-  const abs = join(dir, `${id}.md`)
-  writeFileSync(
-    abs,
-    matter.stringify(content + '\n', {
-      id,
-      title,
-      type: 'synthesis',
-      scope: { type: input.type, value: input.value, paperIds: input.paperIds ?? [] },
-      focus: input.focus ?? [],
-      paperCount: papers.length,
-      createdAt: now,
-      updatedAt: now
-    }),
-    'utf-8'
-  )
-
-  db.upsertSynthesis({
-    id,
-    title,
-    scope: { type: input.type, value: input.value, paperIds: input.paperIds ?? [] },
-    content,
-    relPath: relativeOf(abs, vaultPath),
-    paperCount: papers.length,
-    createdAt: now,
-    updatedAt: now
-  })
-
-  return { ok: true, synthesisId: id, message: `已生成《${title}》` }
-}
-
-/* ------------------------------------------------------------------ */
-/*  关系发现：在数据判定过的候选对上，逐对问模型                        */
-/* ------------------------------------------------------------------ */
-
-/**
- * 「AI 找关系」：把本篇与候选论文**逐对**交给模型判断，成立的写成 `by: 'ai'` 的提议。
- *
- * 三段职责彼此独立（详见 agents/links.ts 头注）：
- *   - 谁值得判 → shared/connections.ts 用知识图谱判定共享技术要素，数据说了算；
- *   - 是不是真有关系 → agents/links.ts 一对一次地问模型，并允许它说不成立；
- *   - 算不算数 → 这里只写「提议」，你在面板里点过采纳才成为你的关系。
- *
- * 为什么提议也落盘（而不是只回给渲染层）：判断要花钱，而且一轮几十秒。
- * 落盘之后可以关掉应用、隔天回来慢慢审，不必为了再审一遍再付一次；
- * 提议带 `by: 'ai'` 标记，在面板与图上都与你自己的判断分得开。
- */
-export async function runLinkDiscovery(input: {
-  paperId: string
-  /** 最多判几对，默认由 connections.ts 定（6） */
-  limit?: number
-}): Promise<LinkDiscoveryResult> {
-  const row = db.getPaperRow(input.paperId)
-  if (!row) return { ok: false, message: '论文不存在。' }
-  const meta = db.paperMetaFromRow(row)
-  const settings = getSettings()
-
-  // 候选完全由数据判定：只有「真正共享具体技术要素」的论文才会进来，筛不出就是空数组
-  const candidates = relatedPapersFrom(input.paperId, db.listPaperRows(), input.limit)
-  const existing: PaperLink[] = meta.links ?? []
-  // 已经连过的不再提 —— 你确认过的、和上次 AI 提过的都算。重复提议会让人以为按钮没生效
-  const fresh = candidates.filter((c) => !existing.some((l) => l.to === c.id))
-
-  if (!fresh.length) {
+  try {
+    const result = await runChatAgent(
+      { papers: picked, messages, scope, memo: options.memo, omitted, tools: chatTools(scope) },
+      settings.llm,
+      call
+    )
     return {
       ok: true,
-      links: existing,
-      judged: 0,
-      proposed: 0,
-      message: candidates.length
-        ? '这些候选都已经连过了，没有新的可判断。'
-        : '库里没有与本篇真正共享技术要素的论文。硬判只会得到「都关注 XX」这类空话，所以这里不猜 —— 先去读几篇同方向的。'
+      content: result.content,
+      ...(result.memo ? { memo: result.memo } : {}),
+      ...(result.trace.length ? { trace: result.trace } : {}),
+      ...(omitted.length ? { omitted } : {})
     }
-  }
-
-  const ownSections = sectionsOf(input.paperId)
-  const from = {
-    title: meta.title,
-    year: meta.year,
-    venue: meta.venue,
-    // 一句话总结不在 frontmatter 里，它就在章节正文里
-    tldr: extractTldr(ownSections),
-    digest: pickLinkDigest(ownSections)
-  }
-
-  const now = new Date().toISOString()
-  const proposed: PaperLink[] = []
-  let failed = 0
-
-  for (let i = 0; i < fresh.length; i++) {
-    const candidate = fresh[i]
-    emitProgress(
-      'relations',
-      `正在判断第 ${i + 1}/${fresh.length} 对：${clipTitle(candidate.title)}`,
-      input.paperId
-    )
-
-    // 已有的那些告诉模型，免得它提议一个你已经标过的类型（它也可能给出**另一个**类型，
-    // 那是有信息量的：同一对关系能同时「可迁移」又「结论冲突」）
-    const linked = existing
-      .filter((l) => l.to === candidate.id)
-      .map((l) => `${LINK_TYPE_LABEL[l.type]}（${l.by === 'ai' ? 'AI 提议，未确认' : '你已确认'}）`)
-
-    try {
-      const verdict = await runLinkJudgeAgent(
-        {
-          from,
-          to: {
-            title: candidate.title,
-            year: candidate.year,
-            tldr: candidate.tldr,
-            digest: pickLinkDigest(sectionsOf(candidate.id))
-          },
-          shared: candidate.shared,
-          existing: linked
-        },
-        settings.llm,
-        { signal: currentSignal() ?? undefined }
-      )
-      const link = verdictToLink(verdict, candidate.id, now)
-      if (link) proposed.push(link)
-    } catch (err) {
-      /*
-       * 一对失败不该让整轮白跑：记一笔继续判下一对。
-       * 取消是例外 —— 用户按了取消就该立刻停，不然要等到循环走完才响应。
-       */
-      if (err instanceof TaskCancelledError) throw err
-      failed++
-      emitProgress('relations', `第 ${i + 1} 对失败：${describeTaskError(err)}`, input.paperId)
+  } catch (err) {
+    // 备忘已经压好就先交出去，别让失败把这次压缩作废
+    if (err instanceof ChatTurnError && err.memo) {
+      return { ok: false, content: '', message: err.message, memo: err.memo }
     }
-  }
-
-  if (!proposed.length) {
-    return {
-      ok: true,
-      links: existing,
-      judged: fresh.length,
-      proposed: 0,
-      message: `判断了 ${fresh.length} 对候选，没有一条能给出可追溯的依据${failed ? `（另有 ${failed} 对判断失败）` : ''}。`
-    }
-  }
-
-  /*
-   * 落盘前重读一次：这轮跑了可能一两分钟，期间渲染层的防抖保存也许刚把你手加的关系
-   * 写进磁盘 —— 拿一开始那份 meta.links 覆盖，会把那条连同这轮提议一起抹掉。
-   */
-  const latestRow = db.getPaperRow(input.paperId)
-  const latest = latestRow ? db.paperMetaFromRow(latestRow) : meta
-  const next = normalizeLinks([...(latest.links ?? []), ...proposed], input.paperId)
-  persistPaper({ ...latest, links: next }, sectionsOf(input.paperId))
-
-  return {
-    ok: true,
-    links: next,
-    judged: fresh.length,
-    proposed: proposed.length,
-    message: `判断了 ${fresh.length} 对，AI 提议 ${proposed.length} 条（在「关联论文」里逐条确认）${
-      failed ? `；${failed} 对判断失败，可以再点一次` : ''
-    }`
-  }
-}
-
-/** 进度文案里的标题截断：任务胶囊只有一行 */
-function clipTitle(title: string): string {
-  return title.length <= 40 ? title : `${title.slice(0, 40)}…`
-}
-
-/* ------------------------------------------------------------------ */
-/*  研究想法：把已确认的关系组合成可验证的题目                          */
-/* ------------------------------------------------------------------ */
-
-/**
- * 「生成研究想法」：拿**你确认过的**论文关系，逐条组合成可验证的题目，落成一份跨论文文档。
- *
- * 为什么是这个形状（详见 shared/ideas.ts 头注）：
- *   - 想法必须站在你自己的判断上 —— `by: 'ai'` 的提议不参与；
- *   - 必须有原料（两篇的方法细节 / 局限 / 可迁移点），空笔记上只会长出空话；
- *   - 来源与依据由数据渲染，不由模型转述（转述一次就可能把「可迁移」说成「基于」）。
- *
- * 产物复用「套路归纳」那套存储（syntheses/ 文件 + 索引行 + 同一套阅读/编辑/导出），
- * 只是 scope.type 记成 'links'，用来说明它是从关系组合出来的，而不是按分类横向比对出来的。
- */
-export async function runIdeaSynthesis(input: { limit?: number } = {}): Promise<AiTaskResult> {
-  const settings = getSettings()
-  const rows = db.listPaperRows()
-  const byId = new Map(rows.map((row) => [row.id, row]))
-
-  /*
-   * 先圈定「需要读正文」的论文：只算被已确认关系牵到的那些。
-   * 全库读一遍 Markdown 是没必要的（几百篇就是几百次文件读），而这份文档的取值范围
-   * 本来就只由关系决定。
-   */
-  const needed = new Set<string>()
-  let confirmedLinks = 0
-  for (const row of rows) {
-    for (const link of row.links ?? []) {
-      if (link.by !== 'user' || link.to === row.id || !byId.has(link.to)) continue
-      confirmedLinks++
-      needed.add(row.id)
-      needed.add(link.to)
-    }
-  }
-
-  if (!confirmedLinks) {
-    throw new Error(
-      '还没有确认过的论文关系。想法要站在你自己的判断上 —— 先去论文详情页的「关联论文」连几条（AI 提议记得点采纳）。'
-    )
-  }
-
-  const facts: IdeaSeedPaper[] = [...needed].map((id) => {
-    const row = byId.get(id) as PaperSummary
-    const sections = sectionsOf(id)
-    return {
-      id,
-      title: row.title,
-      year: row.year,
-      tldr: row.tldr ?? '',
-      method: sections['方法细节'] ?? '',
-      limitation: sections['局限与未来工作'] ?? '',
-      transferable: sections['可迁移到我的研究'] ?? '',
-      exp: row.exp,
-      links: row.links ?? []
-    }
-  })
-
-  const seeds = buildIdeaSeeds(facts, input.limit)
-  if (!seeds.length) {
-    throw new Error(
-      '这些关系两边都还没写下「方法细节 / 局限与未来工作 / 可迁移到我的研究」。原料不足时硬生成只会得到正确的废话 —— 先把这几节写一点，再回来。'
-    )
-  }
-
-  const items: IdeaDocInput[] = []
-  const declined: IdeaDocInput[] = []
-  let failed = 0
-
-  for (let i = 0; i < seeds.length; i++) {
-    const seed = seeds[i]
-    emitProgress(
-      'ideas',
-      `正在组合第 ${i + 1}/${seeds.length} 条：${clipTitle(seed.from.title)} ↔ ${clipTitle(seed.to.title)}`
-    )
-
-    let idea: Idea
-    try {
-      idea = await runIdeaAgent(seed, settings.llm, { signal: currentSignal() ?? undefined })
-    } catch (err) {
-      /*
-       * 一条失败不该让整份文档作废：记进「没能组合成题目」并写明是调用失败 ——
-       * 把它和「材料不够」混在一起，用户会以为自己的笔记有问题。
-       */
-      if (err instanceof TaskCancelledError) throw err
-      failed++
-      declined.push({ seed, idea: { ok: false, reason: `调用模型失败：${describeTaskError(err)}` } })
-      continue
-    }
-    ;(idea.ok ? items : declined).push({ seed, idea })
-  }
-
-  const at = new Date().toISOString()
-  const content = renderIdeaDoc(items, declined, { at, confirmedLinks })
-  const title = `研究想法 · ${items.length} 条（自 ${confirmedLinks} 条关系）`
-  const id = `ideas-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
-  const scope: SynthesisScope = { type: 'links', value: '已确认的论文关系' }
-  const paperCount = needed.size
-
-  const vaultPath = requireVault()
-  const dir = join(vaultPath, vault.VAULT_DIRS.syntheses)
-  mkdirSync(dir, { recursive: true })
-  const abs = join(dir, `${id}.md`)
-  writeFileSync(
-    abs,
-    matter.stringify(content, {
-      id,
-      title,
-      type: 'synthesis',
-      scope,
-      paperCount,
-      createdAt: at,
-      updatedAt: at
-    }),
-    'utf-8'
-  )
-  db.upsertSynthesis({
-    id,
-    title,
-    scope,
-    content,
-    relPath: relativeOf(abs, vaultPath),
-    paperCount,
-    createdAt: at,
-    updatedAt: at
-  })
-
-  return {
-    ok: true,
-    synthesisId: id,
-    message: items.length
-      ? `已生成 ${items.length} 条研究想法${declined.length ? `（另有 ${declined.length} 条没能组合成题目，文档末尾写了缺什么）` : ''}${failed ? `；其中 ${failed} 条是调用失败，可以重跑` : ''}`
-      : '这些关系都没能组合出可验证的题目 —— 缺什么写在文档末尾，通常是因为两边的笔记还太薄。'
-  }
-}
-
-/* ------------------------------------------------------------------ */
-/*  组合分析：把一组自己挑的论文放到一起，看有没有组合创新的空间          */
-/* ------------------------------------------------------------------ */
-
-/**
- * 「组合分析」：对**一组**论文整体判断有没有组合创新的空间，并给出可验证的角度
- * 与「如果合成一篇论文会是什么样」。
- *
- * 与「研究想法」的分工（详见 shared/combo.ts 头注）：想法沿着**一条已确认的关系**往前走；
- * 组合面对**一组论文**，成员之间甚至可能还没有任何关系 —— 那正是要看出来的东西。
- *
- * 为什么一次调用整组、不拆成对：组合是整体性质，「三篇凑一起」的可能性会被成对的判断丢掉。
- * 代价是材料量随篇数线性涨，所以上限 6 篇（MAX_COMBO_PAPERS）。
- */
-export async function runComboAnalysis(input: {
-  paperIds: string[]
-  /** 组合名；留空用「A 等 N 篇」 */
-  title?: string
-  /**
-   * 传了就是**原地重跑**：更新这份文档（成员与内容一起换新），而不是再生成一份。
-   * 组合是要反复调的（换掉一篇再跑一次），每次都新建文档的话，列表很快就全是半成品。
-   */
-  synthesisId?: string
-}): Promise<AiTaskResult> {
-  const settings = getSettings()
-  const ids = [...new Set(input.paperIds.filter(Boolean))]
-
-  const rows = db.listPaperRows()
-  const byId = new Map(rows.map((row) => [row.id, row]))
-  // 库里已经不存在的 id 直接丢掉，但它不能悄悄把「2 篇」变成「1 篇」
-  const picked = ids
-    .map((id) => byId.get(id))
-    .filter((row): row is PaperSummary => !!row)
-
-  if (picked.length < MIN_COMBO_PAPERS) {
-    throw new Error(`组合分析至少要 ${MIN_COMBO_PAPERS} 篇论文，而且都得还在库里。`)
-  }
-  if (picked.length > MAX_COMBO_PAPERS) {
-    throw new Error(`一次最多分析 ${MAX_COMBO_PAPERS} 篇 —— 再多就只能「平均地看每一篇」，先分出主次。`)
-  }
-
-  emitProgress('combo', `正在分析这 ${picked.length} 篇的组合空间…`)
-
-  const papers: ComboPaper[] = picked.map((row) => {
-    const sections = sectionsOf(row.id)
-    return {
-      id: row.id,
-      title: row.title,
-      year: row.year,
-      tldr: row.tldr ?? '',
-      method: sections['方法细节'] ?? '',
-      limitation: sections['局限与未来工作'] ?? '',
-      transferable: sections['可迁移到我的研究'] ?? '',
-      exp: row.exp,
-      links: row.links ?? [],
-      entities: (row.graph?.entities ?? []).map((entity) => ({
-        name: entity.name ?? '',
-        kind: String(entity.kind ?? '')
-      }))
-    }
-  })
-
-  // 组内已有关系与线索都由数据侧算（shared/combo.ts），模型只拿它们当参考
-  const relations = collectComboRelations(papers)
-  const signals = computeComboSignals(papers)
-
-  const analysis = await runComboAgent({ papers, relations, signals }, settings.llm, {
-    signal: currentSignal() ?? undefined
-  })
-
-  const at = new Date().toISOString()
-  const content = renderComboDoc({ papers, relations, signals, analysis, at })
-  /*
-   * 重跑时沿用原来的 id / 文件位置 / 创建时间：组合的成员与内容一起换新，
-   * 但它仍然是同一份文档（列表里不会因为反复调试而堆出一串半成品）。
-   * 文件位置取库里记的 relPath —— 用户可能手动重命名过那个 .md。
-   */
-  const existing = input.synthesisId ? db.getSynthesis(input.synthesisId) : null
-  const id = existing?.id ?? `combo-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
-  const name = (input.title ?? '').trim()
-  const title =
-    name ||
-    existing?.title ||
-    `组合分析 · ${clipTitle(picked[0].title)} 等 ${picked.length} 篇`
-  /*
-   * 存的还是对「挑出来的这几篇」的快照（paperIds）：重跑时正是靠它知道该拿哪几篇去组合，
-   * 这也是「组合」这个概念的最小载体。
-   */
-  const scope: SynthesisScope = {
-    type: 'combo',
-    value: name || (existing ? existing.scope.value : '组合分析'),
-    paperIds: picked.map((row) => row.id)
-  }
-
-  const vaultPath = requireVault()
-  const dir = join(vaultPath, vault.VAULT_DIRS.syntheses)
-  mkdirSync(dir, { recursive: true })
-  const relPath = existing?.relPath || join(vault.VAULT_DIRS.syntheses, `${id}.md`)
-  const abs = join(vaultPath, relPath)
-  writeFileSync(
-    abs,
-    matter.stringify(content, {
-      id,
-      title,
-      type: 'synthesis',
-      scope,
-      paperCount: picked.length,
-      // 不写 createdAt：upsert 会沿用库里原值，重跑不该把「创建于」推到今天
-      updatedAt: at
-    }),
-    'utf-8'
-  )
-  db.upsertSynthesis({
-    id,
-    title,
-    scope,
-    content,
-    relPath,
-    paperCount: picked.length,
-    updatedAt: at
-  })
-
-  return {
-    ok: true,
-    synthesisId: id,
-    message: analysis.ok
-      ? `已给出 ${analysis.angles.length} 个组合角度${analysis.composite ? '，并附了一份「合成后的论文」蓝图' : ''}`
-      : '这一组没能凑出可验证的角度 —— 原因写在文档里。换一组差异更大的试试，或先补几篇的「局限与未来工作」。'
+    throw err
   }
 }

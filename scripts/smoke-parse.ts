@@ -11,31 +11,27 @@
  * 用法：npm run smoke:parse
  */
 import matter from 'gray-matter'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { chatCompletion, extractJson, LlmError } from '../src/main/llm'
 import {
   buildRunRecord,
+  LENS_TOKEN_CEILING,
   lensNote,
+  lensTokenBudget,
   mergeRunRecord,
   summarizeOutcomes,
   type LensRunOutcome
 } from '../src/main/lenses/run'
 import { baseLensContext, evidenceSnippets, sectionRequirements, sourceBlock } from '../src/main/lenses/types'
 import { methodDetailLens } from '../src/main/lenses/methodDetail'
+import { englishLens } from '../src/main/lenses/english'
 import { normalizePaperText, prepareLlmSource } from '../src/main/papertext'
+import { blankPaperMeta, readPaperFile, writePaperFile } from '../src/main/vault'
 import { parseEnvFile } from '../src/main/settings'
-import { buildMethodFlowUser, METHOD_FLOW_SYSTEM, pickFlowPayload } from '../src/main/agents/flow'
-import {
-  buildLinkJudgePrompt,
-  LINKS_SYSTEM,
-  normalizeVerdict,
-  pickLinkDigest,
-  verdictToLink
-} from '../src/main/agents/links'
-import { buildIdeaPrompt, IDEAS_SYSTEM, normalizeIdea } from '../src/main/agents/ideas'
-import { buildComboPrompt, COMBO_SYSTEM, normalizeCombo } from '../src/main/agents/combo'
-import { buildSlidesUser, SLIDES_SYSTEM } from '../src/main/agents/slides'
-import type { LlmSettings } from '@shared/types'
-import { emptyExperimentProfile, normalizeExperimentProfile } from '@shared/experiment'
+import type { LlmSettings, PaperMeta } from '@shared/types'
+import { emptyExperimentProfile, normalizeExperimentProfile, profileCompleteness } from '@shared/experiment'
 import {
   figureMarkdown,
   imageMimeOf,
@@ -48,13 +44,18 @@ import {
 } from '@shared/figures'
 import {
   countEffectiveChars,
+  demoteEmbeddedHeadings,
   emptySections,
   isAiFilled,
   isSectionFilled,
+  parsePaperBody,
+  renderPaperBody,
   SECTION_GROUP_ORDER,
   SECTION_ORDER,
-  sectionGroup
+  sectionGroup,
+  sectionSpec
 } from '@shared/template'
+import { extractPhraseCandidates } from '@shared/phrases'
 import {
   allLensIds,
   disabledLensesFromLegacy,
@@ -66,17 +67,7 @@ import {
   type LensId,
   type PaperGraph
 } from '@shared/lenses'
-import { relatedPapersFrom, renderRelatedPapers } from '@shared/connections'
 import { layoutMethodFlow, normalizeMethodFlow } from '@shared/flow'
-import { LINK_TYPES, normalizeLinks, linkKey, type PaperLink, type PaperLinkType } from '@shared/links'
-import { buildIdeaSeeds, renderIdeaDoc, type IdeaSeedPaper } from '@shared/ideas'
-import {
-  collectComboRelations,
-  computeComboSignals,
-  renderComboDoc,
-  type ComboPaper
-} from '@shared/combo'
-import { ensureVisualSlides, normalizeSlideDeck, pruneSlideVisuals } from '@shared/slides'
 import {
   AGENT_KINDS,
   assignLinesByKind,
@@ -93,7 +84,6 @@ import {
 } from '@shared/autohighlight'
 import { AI_HIGHLIGHT_COLOR, normalizeHighlights } from '@shared/highlights'
 import { layoutMindMap, normalizeMindMap, type MindLayoutNode } from '@shared/mindmap'
-import { gradeQuiz, normalizeQuiz } from '@shared/quiz'
 import { getLens } from '../src/main/lenses'
 import {
   AUTO_HIGHLIGHT_SYSTEM,
@@ -101,7 +91,6 @@ import {
   kindSystem
 } from '../src/main/agents/autohighlight'
 import { buildPassageInstruction, buildPassageSystem } from '../src/main/agents/passage'
-import { buildQuizUser, QUIZ_SYSTEM } from '../src/main/agents/quiz'
 import { normalizeSectionRewrite } from '../src/main/agents/rewrite'
 
 let pass = 0
@@ -391,7 +380,16 @@ async function main(): Promise<void> {
 
   // 极端：老用户把当时能关的都关了
   const migratedAllOff = disabledLensesFromLegacy({ enabledLenses: [] })
-  check('老配置全关时，迁移后老维度仍全关', migratedAllOff.length === LEGACY_DEFAULT.length)
+  /*
+   * 老清单里已下线的维度（graph）不再属于 LensId，迁移自然不会带上它 ——
+   * 所以对标的不是 LEGACY_DEFAULT 的长度，而是「老清单里还存在的那几个」。
+   */
+  const legacyStillExists = LEGACY_DEFAULT.filter((id) => allLensIds().includes(id as LensId))
+  check(
+    '老配置全关时，迁移后仍在的老维度全关',
+    migratedAllOff.length === legacyStillExists.length,
+    `${migratedAllOff.length}/${legacyStillExists.length}`
+  )
   /*
    * 「拆分后新增的维度都该按默认值启用」—— 用「老清单之外的 id」推出来断言，
    * 而不是写死字符串：以后再加维度不用改这条测试，但「新维度有没有真的生效」
@@ -530,6 +528,59 @@ async function main(): Promise<void> {
   check(
     '光有失败原因不算「抽过」（否则又变成假时间戳）',
     normalizeExperimentProfile({ error: '接口返回 429' }).extractedAt === undefined
+  )
+
+  /* ---------------- 11b. 实验清单（论证链） ---------------- */
+  console.log('')
+  console.log('── 11b. 实验清单：主实验 / 消融 / 分析 ─────')
+
+  const rows = normalizeExperimentProfile({
+    experiments: [
+      { kind: 'main', claim: '整体更强', setup: 'HotpotQA × DPR', result: 'F1 +3.2', conclusion: '方法有效' },
+      { kind: '消融', claim: '检索模块有必要', setup: '去掉检索', result: 'F1 −8.1', conclusion: '组件都必要' },
+      { 类别: 'analysis', 验证: '中文也适用', 设置: '中文测试集', 结果: '持平', 结论: '可迁移' }
+    ]
+  }).experiments
+  check('抽出 3 条', rows.length === 3, `实际 ${rows.length}`)
+  check('英文 kind 归一化', rows[0].kind === 'main', rows[0].kind)
+  check('中文 kind 归一化', rows[1].kind === 'ablation', rows[1].kind)
+  check(
+    '中英混写的键名也能读',
+    rows[2].claim === '中文也适用' && rows[2].conclusion === '可迁移',
+    `${rows[2].claim} / ${rows[2].conclusion}`
+  )
+  check(
+    '缺 kind 时归到「分析」而不是瞎猜',
+    normalizeExperimentProfile({ experiments: [{ claim: 'x' }] }).experiments[0].kind === 'analysis'
+  )
+  check(
+    '空壳行被丢弃（否则表格里出现成片空白）',
+    normalizeExperimentProfile({
+      experiments: [{ kind: 'main' }, { claim: '' }, { claim: '真内容' }]
+    }).experiments.length === 1
+  )
+  check('非数组不崩', normalizeExperimentProfile({ experiments: 'main' }).experiments.length === 0)
+  check(
+    '超过 16 行被截断（与 prompt 里的上限对齐）',
+    normalizeExperimentProfile({
+      experiments: Array.from({ length: 30 }, (_, i) => ({ claim: `c${i}` }))
+    }).experiments.length === 16
+  )
+  check(
+    '老数据（没有这个字段）不崩',
+    normalizeExperimentProfile({ datasets: ['A'] }).experiments.length === 0
+  )
+  check(
+    '完整度：论证链权重最高（2 + 主实验 1 + 消融 1）',
+    profileCompleteness(
+      normalizeExperimentProfile({
+        experiments: [{ kind: 'main', claim: 'a' }, { kind: 'ablation', claim: 'b' }]
+      })
+    ) === 4
+  )
+  check(
+    '只做主实验也拿分（没做消融是常见且合理的情况）',
+    profileCompleteness(normalizeExperimentProfile({ experiments: [{ kind: 'main', claim: 'a' }] })) === 3
   )
 
   /* ---------------- 12. 限流 / 网关抖动自动重试 ---------------- */
@@ -774,6 +825,18 @@ async function main(): Promise<void> {
   check('一切正常时不给噪音', lensNote(6, 6, false) === '')
   check('不写章节的维度（experiment / graph）不报「产出不全」', lensNote(0, 0, false) === '')
 
+  /*
+   * 维度输出预算。真实事故：这里一度是 `Math.min(配置值, 维度值)`，
+   * 于是 .env 里的 131072 变成死配置、每个维度只剩 2K~4K —— 强制思考的模型
+   * 把预算全花在 reasoning 上，一篇 42 页论文 12 个维度里 9 个返回空内容、
+   * 3 个被截断（同一批论文在预算放开时是 12 个全成）。
+   */
+  check('全局配置调小也不会压垮维度自己的体积预算', lensTokenBudget(4096, 2048) === 4096)
+  check('全局配置更大时照用（推理模型的思考要从这里扣）', lensTokenBudget(4096, 131072) === LENS_TOKEN_CEILING)
+  check('再大也不越过上限（给到 131072 会一路写到超时）', lensTokenBudget(2048, 999_999) === LENS_TOKEN_CEILING)
+  check('没配全局预算时用维度自己的值', lensTokenBudget(3072, undefined) === 3072)
+  check('上限要高于实测最长的维度输出（14,593）', LENS_TOKEN_CEILING > 14593, String(LENS_TOKEN_CEILING))
+
   const midway = buildRunRecord([outcome('overview', false, '速览与故事线：任务已取消。')], 8)
   check(
     '中途取消（循环被打断、没抛错）也认得出',
@@ -830,6 +893,74 @@ async function main(): Promise<void> {
   }
   check('带内容的画像能过 js-yaml 序列化（这就是当时崩掉的那一步）', yamlOk)
 
+  /*
+   * 同一个坑后来又踩了两次，都是「某个可选字段没值时顺手写成了 undefined」：
+   * 图谱的 `aliases` / `evidence`、句式库的 `example` / `from`。
+   * 代价完全一样：精读跑了十几分钟，落盘那一步整篇抛掉，笔记停在空骨架，
+   * `last_run` 里只留一句看不出是哪个字段的「unacceptable kind of an object to dump」。
+   * 所以从两头锁：产出数据的解析器不留 undefined 键，落盘本身也兜一层。
+   */
+  const hasUndefinedValue = (value: unknown): boolean => {
+    if (Array.isArray(value)) return value.some(hasUndefinedValue)
+    if (value && typeof value === 'object') {
+      return Object.entries(value).some(([, v]) => v === undefined || hasUndefinedValue(v))
+    }
+    return false
+  }
+  const canStringify = (data: Record<string, unknown>): boolean => {
+    try {
+      matter.stringify('正文', data)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  const phraseOut = englishLens.parse(
+    {
+      phrases: [
+        { category: '报告结果', text: 'we observe that', usage: '报告一条实测结论' },
+        {
+          category: '认不出的分类',
+          text: 'as shown in Fig. 3',
+          usage: '指向图表',
+          example: 'As shown in Fig. 3, …',
+          from: 'Experiments'
+        }
+      ]
+    },
+    fakeCtx
+  )
+  const phraseData = (phraseOut.data as { phrases?: unknown[] } | undefined)?.phrases
+  check('句式解析不留 undefined 键', !hasUndefinedValue(phraseData))
+  check('没有例句的短语能过 js-yaml', canStringify({ phrases: phraseData }))
+  check(
+    '有例句的短语照常保留例句与出处',
+    JSON.stringify(phraseData).includes('As shown in Fig. 3') && JSON.stringify(phraseData).includes('Experiments')
+  )
+
+  /*
+   * 兜底那一层：故意塞一个值为 undefined 的键（模拟将来某个字段忘了处理），
+   * 整篇笔记必须照常落盘，只丢掉那一个键。
+   */
+  const tempVault = mkdtempSync(join(tmpdir(), 'pv-yaml-'))
+  try {
+    const yamlMeta = blankPaperMeta({ title: '落盘兜底', authors: ['A'] })
+    yamlMeta.graph = {
+      entities: [{ name: 'LIBERO', kind: 'benchmark', aliases: undefined }],
+      relations: []
+    } as unknown as PaperMeta['graph']
+    const written = writePaperFile(tempVault, yamlMeta, { 一句话总结: '正文' })
+    const back = readPaperFile(written.absPath, tempVault)
+    check('落盘兜底：值为 undefined 的键被丢掉，而不是整篇写不出去', back !== null)
+    check(
+      '其余字段与正文照常落盘',
+      back?.meta.title === '落盘兜底' && back?.sections['一句话总结'] === '正文'
+    )
+  } finally {
+    rmSync(tempVault, { recursive: true, force: true })
+  }
+
   /* ---------------- 17. 写作维度拆分（6 节 → 3+3） ---------------- */
   console.log('')
   console.log('── 17. 写作维度拆分 ──────────────────────')
@@ -874,6 +1005,131 @@ async function main(): Promise<void> {
     writingLenses.map((l) => `${l.id}:${l.sections.length} 节`).join('　')
   )
 
+  /* ---------------- 17b. 写作骨架：说清 > 说全 ---------------- */
+  console.log('')
+  console.log('── 17b. 写作骨架：说清 > 说全 ─────────────')
+
+  /*
+   * 起因：写作拆解产出「又长又抽象」—— 一节骨架挂着 5~7 个并列标签，每个标签下模型
+   * 写一大段，读到的是一堆「结构清晰 / 层层递进」式的概括，而不是「这段在推哪一步」。
+   * 骨架因此收窄成「一句话主线 + 逐段推进 + 一个本节特有角度 + 可复用句式」。
+   * 下面这些断言钉的是收窄的效果：防止以后又加回一堆并列标签、或把句式收纳框弄丢。
+   */
+  const writingKeys = SECTION_ORDER.filter((k) => k.startsWith('写作手法'))
+  /** 数骨架里有几个 `**标签**` —— 并列标签越多，模型越会为了填满它们凑字 */
+  const labelCount = (text: string): number => [...text.matchAll(/\*\*(.+?)\*\*/g)].length
+
+  check('五个写作章节都在', writingKeys.length === 5, writingKeys.join('、'))
+  check(
+    '每节都先要求「一句话主线」（写作逻辑先讲清楚）',
+    writingKeys.every((k) => sectionSpec(k)?.scaffold.includes('一句话主线')),
+    writingKeys.filter((k) => !sectionSpec(k)?.scaffold.includes('一句话主线')).join('、')
+  )
+  check(
+    '每节最多 4 个标签',
+    writingKeys.every((k) => labelCount(sectionSpec(k)?.scaffold ?? '') <= 4),
+    writingKeys.map((k) => `${k.replace('写作手法 · ', '')}:${labelCount(sectionSpec(k)?.scaffold ?? '')}`).join('　')
+  )
+  check(
+    '每节都留着「可复用句式」收纳框（句式库靠它抽）',
+    writingKeys.every((k) => sectionSpec(k)?.scaffold.includes('可复用句式'))
+  )
+  /*
+   * 贡献段是最常被读、也最常被抄的部分。只靠「逐段推进」的话，模型会把它
+   * 压成一句「最后列出了三条贡献」—— 读者学不到任何东西。所以 Intro 必须
+   * 有一格专门拆「主张 → 缺口 → 证据」，且逐条写。
+   */
+  check(
+    'Introduction 骨架单独拆贡献段（主张 / 缺口 / 证据）',
+    (sectionSpec('写作手法 · Introduction')?.scaffold ?? '').includes('贡献段怎么列')
+  )
+
+  // 按新骨架填的内容，句式库必须还能抽到引号里的英文原句
+  const filledIntro =
+    '- **一句话主线**（作者要读者接受什么，按什么顺序推）：先用「任务成功后仍会失败」演一遍问题，再用「现有 benchmark 把条件固定在 reset」切出缺口。\n' +
+    '- **逐段推进**（一段一行：这段做什么 → 起作用的英文原句）：\n' +
+    '  - 第 1 段：把问题演成场景，不用形容词。\n' +
+    '  - 第 2 段：一刀切出缺口，随后立刻给体量数字。\n' +
+    '- **Gap 从哪一句开始转向**（引用英文原句）：从 "Many simulation robustness benchmarks fix external conditions at reset" 开始转向。\n' +
+    '- **可复用句式**（最多 3 条：英文原句 + 用在哪）：\n' +
+    '  - "Robots must often continue a task after a target moves." → 开篇把问题演一遍。'
+  const harvested = extractPhraseCandidates({ '写作手法 · Introduction': filledIntro })
+  check(
+    '新骨架下引号里的英文原句照样进句式库',
+    harvested.some((c) => c.text.includes('Robots must often continue')),
+    harvested.map((c) => c.text).join(' | ').slice(0, 160)
+  )
+  check(
+    '标签后的括号说明不会被当成句式（否则每篇都塞一条垃圾）',
+    !harvested.some((c) => c.text.startsWith('（')),
+    harvested.map((c) => c.text).join(' | ').slice(0, 160)
+  )
+
+  /*
+   * 骨架改版最容易误伤的地方：`isSectionFilled` 是拿**当前**骨架比对的，
+   * 于是停在旧骨架上的论文会被判成「已精读」—— 列表打标记、统计虚高，
+   * 点进去却全是空标签（正是当初引入它时要防的那件事）。历史骨架因此冻结参与比对。
+   */
+  const oldIntroScaffold =
+    '- **段落推进逻辑**（每段做什么）：\n- **如何铺垫 Gap**：\n- **Contribution 怎么写**（几条、动词、粒度）：\n- **Teaser 图 / 首图的作用**：\n- **可复用句式**：'
+  /** 收窄后、补贡献段之前的那一版 —— 它也得进 LEGACY_SCAFFOLDS，否则老笔记会假装「已填」 */
+  const narrowIntroScaffold =
+    '- **一句话主线**（作者要读者接受什么，按什么顺序推）：\n- **逐段推进**（一段一行：这段做什么 → 起作用的英文原句）：\n- **Gap 从哪一句开始转向**（引用英文原句）：\n- **可复用句式**（最多 3 条：英文原句 + 用在哪）：'
+  check(
+    '停在旧骨架上的章节仍然算「没填」',
+    !isSectionFilled('写作手法 · Introduction', oldIntroScaffold)
+  )
+  check(
+    '上一版（未含贡献段）骨架也仍然算「没填」',
+    !isSectionFilled('写作手法 · Introduction', narrowIntroScaffold)
+  )
+  check('旧骨架也不计进有效字数', countEffectiveChars({ '写作手法 · Introduction': oldIntroScaffold }) === 0)
+  check(
+    '旧骨架 + 真内容仍然算「已填」（改版不该把老笔记全判成空的）',
+    isSectionFilled('写作手法 · Introduction', `${oldIntroScaffold}\n- 第 1 段先演一遍问题。`)
+  )
+  check(
+    '停在旧骨架上的论文不会被当成「已精读」',
+    !isAiFilled({ '写作手法 · Introduction': oldIntroScaffold, '写作手法 · Abstract': oldIntroScaffold })
+  )
+
+  /* ---------------- 17c. 章节值里自带的「## 」标题不能切碎章节 ---------------- */
+  console.log('')
+  console.log('── 17c. 章节值里的「## 」标题降级 ─────────────')
+
+  /*
+   * 真实事故（2026-10，三篇连续中招）：模型把「方法细节」的骨架标签全写成
+   * `## 一句话概括`、`## 输入 / 输出`……落盘再读回来时，正主章节里只剩
+   * 第一个自加标题前的 0 字符，几千字正文变成一串孤儿自定义章节 ——
+   * 界面上「方法细节 / 具体例子」永远空白，运行记录却是 ✓。
+   * 修复在 renderPaperBody：值里的 `## ` 一律降级成 `### `，代码围栏内不动。
+   */
+  const corrupted = {
+    方法细节: '## 一句话概括\n\n用 A 做 B。\n\n## 输入 / 输出\n\n输入是图片，输出是分数。',
+    具体例子: '代码里的标题行不该被动：\n\n```md\n## 这是代码示例\n```\n\n完。'
+  }
+  const repaired = parsePaperBody(renderPaperBody(corrupted))
+  check(
+    '值里的 ## 标题被降级，正主章节完整保留',
+    (repaired['方法细节'] ?? '').includes('用 A 做 B。') &&
+      (repaired['方法细节'] ?? '').includes('输入是图片，输出是分数。'),
+    Object.keys(repaired).join('、')
+  )
+  check(
+    '不再出现孤儿章节',
+    Object.keys(repaired).filter((k) => k.includes('一句话概括') || k.includes('输入 / 输出'))
+      .length === 0,
+    Object.keys(repaired).join('、')
+  )
+  check(
+    '代码围栏内的 ## 不被动',
+    (repaired['具体例子'] ?? '').includes('## 这是代码示例')
+  )
+  check(
+    '降级后的结构仍在（### 保留）',
+    (repaired['方法细节'] ?? '').includes('### 一句话概括')
+  )
+
   /* ---------------- 18. 重试只补失败的那几个 ---------------- */
   console.log('')
   console.log('── 18. 重试只补失败的那几个 ───────────────')
@@ -892,8 +1148,7 @@ async function main(): Promise<void> {
     'visuals',
     'experiment',
     'method',
-    'limitations',
-    'graph'
+    'limitations'
   ]
   const fullRun = buildRunRecord(
     nineLenses.map((id) =>
@@ -912,8 +1167,8 @@ async function main(): Promise<void> {
 
   const retried = mergeRunRecord(fullRun, [outcome('experiment', true, '完成')])
   check(
-    '并回后仍是 9 个维度（不是只剩重试的那 1 个）',
-    retried.lenses.length === 9,
+    '并回后仍是完整维度数（不是只剩重试的那 1 个）',
+    retried.lenses.length === nineLenses.length,
     `${retried.lenses.length} 个`
   )
   check('补上最后一个 → 状态转成「全部成功」', retried.status === 'ok', retried.message)
@@ -923,6 +1178,38 @@ async function main(): Promise<void> {
     retried.message
   )
   check('没被重试的维度保留原结局', retried.lenses.find((l) => l.id === 'overview')?.ok === true)
+
+  /*
+   * 历史记录里可能留着一条「任务已取消」（上次跑到一半被中断的那些维度）。
+   * 它属于历史事实，不该参与「这次重试结果如何」的判定 —— 否则用户单独重试成功，
+   * 状态条还是显示「已取消」，看起来就像重试没生效。
+   */
+  // 基底用「全部成功」的那次（retried），再伪造一个「历史里留着取消」的维度
+  const withHistoricCancel = {
+    ...retried,
+    lenses: retried.lenses.map((l) =>
+      l.id === 'visuals' ? { ...l, ok: false, message: '图表与可视化设计：任务已取消。' } : l
+    )
+  }
+  const afterCancelRetry = mergeRunRecord(withHistoricCancel, [outcome('visuals', true, '完成')])
+  check(
+    '历史里的「任务已取消」不污染这次重试的结果',
+    afterCancelRetry.status === 'ok',
+    afterCancelRetry.status
+  )
+
+  /*
+   * 另一个会让人以为「重试坏了」的场景：重试在**发出请求之前**就崩了
+   *（没原文 / 401 / 知识库没打开）。此时 outcomes 是空的，不能把整篇从
+   * 「部分失败」升级成「失败」—— 那会把另外 8 个成功的维度一起说成失败。
+   */
+  const crashedRetry = mergeRunRecord(fullRun, [], new Error('接口返回 401'))
+  check(
+    '单维度重试崩在发请求前，整体状态沿用上一次',
+    crashedRetry.status === fullRun.status,
+    crashedRetry.status
+  )
+  check('但这次失败的原因要写进 message', crashedRetry.message.includes('401'), crashedRetry.message)
 
   const retriedAgain = mergeRunRecord(fullRun, [
     outcome('experiment', false, '实验画像抽取：接口返回 429')
@@ -1237,116 +1524,6 @@ async function main(): Promise<void> {
       方法串联: '- 串上了',
       举一反三: '- 迁移了'
     })
-  )
-
-  /* ---- 跨论文相关性：关系必须由数据判定 ---- */
-  const graphOf = (entities: GraphEntity[]): PaperGraph => ({ entities, relations: [] })
-  const me = {
-    id: 'me',
-    title: '本篇',
-    year: 2026,
-    tldr: '',
-    graph: graphOf([
-      { name: 'DROID', kind: 'dataset' },
-      { name: 'VLA', kind: 'task' }
-    ])
-  }
-  const sameDataset = {
-    id: 'p1',
-    title: '也用了 DROID',
-    year: 2025,
-    tldr: '用 DROID 做真机评测',
-    graph: graphOf([{ name: 'droid', kind: 'dataset' }])
-  }
-  const viaAlias = {
-    id: 'p2',
-    title: '别名匹配',
-    year: 2024,
-    tldr: '',
-    graph: graphOf([{ name: '某数据集', kind: 'dataset', aliases: [' DROID '] }])
-  }
-  const onlyConcept = {
-    id: 'p3',
-    title: '只共享概念词',
-    year: 2026,
-    tldr: '',
-    graph: graphOf([{ name: 'DROID', kind: 'concept' }])
-  }
-  const onlyTask = {
-    id: 'p4',
-    title: '只共享一个笼统任务',
-    year: 2026,
-    tldr: '',
-    graph: graphOf([{ name: 'VLA', kind: 'task' }])
-  }
-  const noGraph = { id: 'p5', title: '没有图谱', year: 2026, tldr: '' }
-
-  const related = relatedPapersFrom('me', [me, sameDataset, viaAlias, onlyConcept, onlyTask, noGraph])
-  check(
-    '共享数据集 → 命中（大小写不敏感）',
-    related.some((p) => p.id === 'p1'),
-    related.map((p) => `${p.id}:${p.score}`).join(' ')
-  )
-  check('别名也认（归一化后同一实体）', related.some((p) => p.id === 'p2'))
-  check('自己不出现在候选里', !related.some((p) => p.id === 'me'))
-  check(
-    '只共享 concept 不算相关 —— 这类词任何两篇都能共享',
-    !related.some((p) => p.id === 'p3')
-  )
-  check(
-    '只共享一个笼统任务名不算相关 —— 挡掉「都关注 XX」式关联',
-    !related.some((p) => p.id === 'p4')
-  )
-  check('没有图谱的论文不进候选', !related.some((p) => p.id === 'p5'))
-  check(
-    '候选带上「因为什么相关」，模型才有依据',
-    (related[0]?.shared.length ?? 0) > 0,
-    related[0]?.shared.join('、') ?? ''
-  )
-
-  const strong = {
-    id: 'strong',
-    title: '共享一个数据集 + 一个任务',
-    year: 2024,
-    tldr: '',
-    graph: graphOf([
-      { name: 'DROID', kind: 'dataset' },
-      { name: 'VLA', kind: 'task' }
-    ])
-  }
-  const weak = {
-    id: 'weak',
-    title: '只共享三个笼统要素',
-    year: 2026,
-    tldr: '',
-    graph: graphOf([
-      { name: 'VLA', kind: 'task' },
-      { name: 'A', kind: 'technique' },
-      { name: 'B', kind: 'technique' }
-    ])
-  }
-  const ranked = relatedPapersFrom('me', [me, weak, strong])
-  check(
-    '具体要素多的排在笼统要素多的前面',
-    ranked[0]?.id === 'strong',
-    ranked.map((p) => `${p.id}:${p.score}`).join(' ')
-  )
-
-  check('筛不出候选时返回空数组', relatedPapersFrom('me', [me, noGraph]).length === 0)
-  check('本篇自己没有图谱时也不乱给候选', relatedPapersFrom('nobody', [me, sameDataset]).length === 0)
-
-  /* ---- prompt 措辞：必须给模型「串不上」这条退路 ---- */
-  const emptyBlock = renderRelatedPapers([])
-  check(
-    '没候选时明确要求写「串不上」而不是硬凑',
-    /库内暂无与本篇真正可串联/.test(emptyBlock) && /不要.*关联无关论文/.test(emptyBlock)
-  )
-  const filledBlock = renderRelatedPapers(related)
-  check('有候选时说明筛选依据是「共享的技术要素」', /共享的技术要素/.test(filledBlock))
-  check(
-    '有候选时也明确允许说「关系不成立」',
-    /关系不成立/.test(filledBlock),
-    '不给这条退路，模型会默认「给了素材就得写出关联」'
   )
 
   /*
@@ -1715,8 +1892,8 @@ async function main(): Promise<void> {
     AUTO_HIGHLIGHT_SYSTEM.includes('只输出一个合法 JSON 对象')
   )
   check(
-    'system 里写了「宁缺毋滥」（标太多等于没标）',
-    AUTO_HIGHLIGHT_SYSTEM.includes('宁缺毋滥')
+    'system 里写了「覆盖优先」（该标的都要标上 —— 取舍是刻意改的：宁可多标，也别漏掉图注、例子这类助理解的信息）',
+    AUTO_HIGHLIGHT_SYSTEM.includes('覆盖优先')
   )
   const userPrompt = buildAutoHighlightUser('测试论文', srcLines)
   check(
@@ -1788,6 +1965,21 @@ async function main(): Promise<void> {
     'classifyHeadings：附录里自带关键词的子标题照样归类（C.1 More Ablations → experiment）',
     classifyHeadings(['Appendix', 'C.1 More Ablations']),
     ['skip', 'experiment']
+  )
+  eq(
+    '实现细节 / 超参要喂给实验专家（硬件与超参常常只写在这些章节里）',
+    classifyHeadings([
+      '4 Experiments',
+      'B Implementation Details',
+      'C Hyperparameters',
+      'D Dataset Statistics'
+    ]),
+    ['experiment', 'experiment', 'experiment', 'experiment']
+  )
+  eq(
+    '附录里的证明过程仍然跳过（它不是实验设置）',
+    classifyHeadings(['Appendix A Proofs', 'References', 'Acknowledgements']),
+    ['skip', 'skip', 'skip']
   )
   eq(
     'classifyHeadings：顶层命不中的按跳过处理（喂错专家比不喂更糟）',
@@ -1924,10 +2116,18 @@ async function main(): Promise<void> {
     })()
   )
   check(
-    '四个专家 prompt 都带 JSON 约束与「宁缺毋滥」（各自单独调模型，不能只钉在总 prompt 上）',
+    '四个专家 prompt 都带 JSON 约束与覆盖要求（各自单独调模型，不能只钉在总 prompt 上）',
     AGENT_KINDS.map((k) => kindSystem(k)).every(
-      (p) => p.includes('只输出一个合法 JSON 对象') && p.includes('宁缺毋滥')
+      (p) => p.includes('只输出一个合法 JSON 对象') && p.includes('覆盖优先')
     )
+  )
+  check(
+    '方法专家要标图注 / 示意图引用 / 具体例子 / 算法框（初学者靠这些才看懂方法设计）',
+    ['图注', '例子', 'Algorithm'].every((word) => kindSystem('method').includes(word))
+  )
+  check(
+    '实验专家要标结果图表的图注（图注比在表格里找数字快得多）',
+    kindSystem('experiment').includes('图注')
   )
   check(
     '专家 prompt 只允许输出自己那类 kind（混类会打乱配额与标签）',
@@ -1935,88 +2135,6 @@ async function main(): Promise<void> {
       !kindSystem('problem').includes('problem|method') &&
       kindSystem('experiment').includes('"experiment" 或 "result"')
   )
-
-  /* ---------------- 24. 「考考我」自测题 ---------------- */
-  console.log('')
-  console.log('── 24. 自测题：解析容错与本地判分 ──────────')
-
-  const quizQ = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
-    q: '这篇论文解决的核心问题是什么？',
-    options: ['A 甲', 'B 乙', 'C 丙', 'D 丁'],
-    answer: 1,
-    why: '解析：因为……',
-    source: '§1',
-    ...over
-  })
-
-  const okQuiz = normalizeQuiz({ questions: [quizQ(), quizQ(), quizQ()] }, '2026-09-16T00:00:00.000Z')
-  check('正常出题能解析', okQuiz?.questions.length === 3)
-  check(
-    '有效题目不足 3 道 → undefined（一两道题测不出理解盲区，调用方提示重试）',
-    normalizeQuiz({ questions: [quizQ(), quizQ()] }) === undefined
-  )
-  check(
-    '答案下标越界的题被丢掉',
-    normalizeQuiz({ questions: [quizQ(), quizQ(), quizQ(), quizQ({ answer: 9 })] })?.questions
-      .length === 3
-  )
-  check(
-    '选项去空去重后不足 2 个 → 不成题',
-    normalizeQuiz({ questions: [quizQ(), quizQ(), quizQ(), quizQ({ options: ['甲', '', '  '], answer: 0 })] })
-      ?.questions.length === 3
-  )
-  check(
-    '没有解析的题被丢掉（答错的人全靠解析知道回哪里重读）',
-    normalizeQuiz({ questions: [quizQ(), quizQ(), quizQ(), quizQ({ why: '' })] })?.questions
-      .length === 3
-  )
-  check(
-    '题量有上限（太多初学者做不完）',
-    normalizeQuiz({ questions: Array.from({ length: 15 }, () => quizQ()) })?.questions.length === 8
-  )
-  check(
-    '没值的字段不出现在对象里（js-yaml 遇 undefined 会抛）',
-    (() => {
-      const q = normalizeQuiz({ questions: [quizQ(), quizQ(), quizQ({ source: '' })] })!
-      return (
-        q.questions.every((item) => Object.values(item).every((v) => v !== undefined)) &&
-        !('source' in q.questions[2]) &&
-        Object.values(q).every((v) => v !== undefined)
-      )
-    })()
-  )
-  check(
-    '已有 createdAt 不被刷新（重测多次题还是那套题）',
-    normalizeQuiz({ createdAt: '2026-01-01', questions: [quizQ(), quizQ(), quizQ()] })?.createdAt ===
-      '2026-01-01'
-  )
-
-  /* 判分：本地纯函数，对答案不再调用模型 */
-  const gradeTarget = normalizeQuiz({ questions: [quizQ({ answer: 0 }), quizQ({ answer: 2 }), quizQ({ answer: 1 })] })!
-  const graded = gradeQuiz(gradeTarget, [0, 1, null])
-  check(
-    '判分：全对 / 答错 / 未作答 分开算',
-    graded.correct === 1 && graded.total === 3 && graded.results.join(',') === 'true,false,false',
-    JSON.stringify(graded.results)
-  )
-  check(
-    '答案下标越界算错（不抛错）',
-    gradeQuiz(gradeTarget, [99, 2, 1]).correct === 2
-  )
-
-  check(
-    '出题 prompt 写明「考理解，不考记忆」',
-    QUIZ_SYSTEM.includes('考理解，不考记忆')
-  )
-  check('出题 prompt 有 JSON 约束', QUIZ_SYSTEM.includes('合法 JSON'))
-  check(
-    'user prompt 带上标题和正文',
-    buildQuizUser('测试论文', '正文内容').includes('测试论文') &&
-      buildQuizUser('测试论文', '正文内容').includes('正文内容')
-  )
-
-  /* ---------------- 25. 全文思维导图 ---------------- */
-  console.log('')
   console.log('── 25. 思维导图：解析与树布局 ──────────────')
 
   const mind = (
@@ -2179,1033 +2297,6 @@ async function main(): Promise<void> {
     ovLens?.parse({ categories: [], tags: [], sections: {}, mindmap: { root: mind('独根') } }, {} as never)
       ?.data === undefined
   )
-
-  /* ---------------- 24. 演示稿：解析、容错、图纸降级 ---------------- */
-  console.log('')
-  console.log('── 24. 演示稿：解析 / 容错 / 图纸降级 ──────')
-
-  const mkSlide = (
-    title: string,
-    bullets: string[] = ['要点'],
-    extra: Record<string, unknown> = {}
-  ): Record<string, unknown> => ({ title, bullets, ...extra })
-
-  const deck = normalizeSlideDeck({
-    audience: '组会，讲 10 分钟',
-    slides: [
-      mkSlide('为什么值得听', ['一句话讲清它的价值']),
-      mkSlide('问题难在哪', ['现有做法全靠人工']),
-      mkSlide('方法流程', [], { visual: 'flow' }),
-      mkSlide('关键证据', ['3B 模型追平 70B'])
-    ]
-  })
-  check('够页数的演示稿能通过', deck?.slides.length === 4)
-  eq('audience 保留', deck?.audience, '组会，讲 10 分钟')
-  check(
-    '图纸页允许没有要点（一页就一张图）',
-    deck?.slides[2].visual === 'flow' && deck?.slides[2].bullets.length === 0
-  )
-  check(
-    '缺标题的页被丢掉（投出去只剩一屏光秃秃的要点）',
-    normalizeSlideDeck({
-      slides: [mkSlide(''), mkSlide('b'), mkSlide('c'), mkSlide('d'), mkSlide('e')]
-    })?.slides.length === 4
-  )
-  check(
-    '纯文字页没有要点也要丢掉',
-    normalizeSlideDeck({
-      slides: [mkSlide('a', []), mkSlide('b'), mkSlide('c'), mkSlide('d'), mkSlide('e')]
-    })?.slides.length === 4
-  )
-  check(
-    '不认识的 visual 收敛成普通页（要点留着，别整页丢）',
-    (() => {
-      const d = normalizeSlideDeck({
-        slides: [mkSlide('a', ['x'], { visual: 'chart' }), mkSlide('b'), mkSlide('c'), mkSlide('d')]
-      })
-      return d?.slides[0].visual === undefined && d?.slides[0].bullets.length === 1
-    })()
-  )
-  check(
-    '要点最多 6 条',
-    normalizeSlideDeck({
-      slides: [
-        mkSlide('a', Array.from({ length: 9 }, (_, i) => `要点 ${i}`)),
-        mkSlide('b'),
-        mkSlide('c'),
-        mkSlide('d')
-      ]
-    })?.slides[0].bullets.length === 6
-  )
-  check(
-    '标题超长被截断',
-    normalizeSlideDeck({
-      slides: [mkSlide('标'.repeat(90)), mkSlide('b'), mkSlide('c'), mkSlide('d')]
-    })?.slides[0].title.length === 48
-  )
-  check(
-    '页数上限 16 页（再多听众记不住）',
-    normalizeSlideDeck({
-      slides: Array.from({ length: 30 }, (_, i) => mkSlide(`第 ${i + 1} 页`))
-    })?.slides.length === 16
-  )
-  check(
-    '页数不足 4 页返回 undefined（交给调用方报错重试，不拿残稿覆盖）',
-    normalizeSlideDeck({ slides: [mkSlide('a'), mkSlide('b'), mkSlide('c')] }) === undefined
-  )
-  check('空输入返回 undefined', normalizeSlideDeck(null) === undefined)
-  check(
-    '模型直接吐数组也能解析',
-    normalizeSlideDeck([mkSlide('a'), mkSlide('b'), mkSlide('c'), mkSlide('d')])?.slides.length === 4
-  )
-
-  /*
-   * 可选键必须「没值就不出现」：值为 undefined 的键会让 js-yaml 直接抛
-   *（writePaperFile 必经之路，后端真崩过一次）。
-   */
-  check(
-    '可选键缺省时不写出来',
-    deck !== undefined && !('note' in deck.slides[0]) && !('source' in deck.slides[0])
-  )
-  check('演示稿能过 js-yaml 序列化', (() => {
-    try {
-      matter.stringify('正文\n', { slides: deck })
-      return true
-    } catch {
-      return false
-    }
-  })())
-
-  /* ---- 具体例子页：讲解系统最有用的一页，不能只有抽象要点 ---- */
-  const withExample = normalizeSlideDeck({
-    slides: [
-      mkSlide('拿一道题走一遍', ['看它怎么处理'], {
-        example: { input: '一道多跳问题', steps: ['取检索片段', '拼进 prompt'], output: '带出处的答案' }
-      }),
-      mkSlide('只有例子没有要点', [], {
-        example: { input: '一个场景', steps: ['第一步', '第二步'] }
-      }),
-      mkSlide('c'),
-      mkSlide('d')
-    ]
-  })
-  check('具体例子被解析出来', withExample?.slides[0].example?.steps.length === 2)
-  check(
-    '只有例子、没有要点也保留（这一页的价值就在例子）',
-    withExample?.slides[1].example?.input === '一个场景' && withExample?.slides[1].bullets.length === 0
-  )
-  check(
-    '步骤不足两步不算「走了一遍」，整块丢掉',
-    normalizeSlideDeck({
-      slides: [
-        mkSlide('a', ['x'], { example: { input: 'i', steps: ['只有一步'] } }),
-        mkSlide('b'),
-        mkSlide('c'),
-        mkSlide('d')
-      ]
-    })?.slides[0].example === undefined
-  )
-  check(
-    '例子缺 input 也算废',
-    normalizeSlideDeck({
-      slides: [
-        mkSlide('a', ['x'], { example: { input: '  ', steps: ['一', '二'] } }),
-        mkSlide('b'),
-        mkSlide('c'),
-        mkSlide('d')
-      ]
-    })?.slides[0].example === undefined
-  )
-
-  /* ---- 原文图页 ---- */
-  const withFigure = normalizeSlideDeck({
-    slides: [
-      mkSlide('看图上的三个模块', ['看右下角怎么连'], { visual: 'figure', figure: 'figures/p1/fig-2.png' }),
-      mkSlide('b'),
-      mkSlide('c'),
-      mkSlide('d')
-    ]
-  })
-  check('原文图页保留路径', withFigure?.slides[0].figure === 'figures/p1/fig-2.png')
-  check(
-    '点名 figure 却没给路径 → 退回普通页（要点留着，别整页丢）',
-    (() => {
-      const d = normalizeSlideDeck({
-        slides: [mkSlide('a', ['x'], { visual: 'figure' }), mkSlide('b'), mkSlide('c'), mkSlide('d')]
-      })
-      return d?.slides[0].visual === undefined && d?.slides[0].bullets.length === 1
-    })()
-  )
-
-  /*
-   * 图纸降级：visual 是模型点名的，但那些画面是**别处**产出的 —— 流程图来自
-   * 方法维度那次精读，原文图来自用户自己截的图，都可能压根不存在。
-   */
-  const noVisual = pruneSlideVisuals(deck!, { flow: false, mindmap: false, figures: [] })
-  check(
-    '库里没有流程图 → 只有画面的那页被摘掉（留着就是对着空屏发愣）',
-    noVisual.slides.every((s) => s.title !== '方法流程') && noVisual.slides.length === 3
-  )
-  check(
-    '有流程图 → 保留 visual',
-    pruneSlideVisuals(deck!, { flow: true, mindmap: false, figures: [] }).slides[2].visual === 'flow'
-  )
-  check('降级不动别的页', noVisual.slides[1].title === '问题难在哪')
-
-  const flowWithBullets = normalizeSlideDeck({
-    slides: [
-      mkSlide('方法流程', ['看左下角那块怎么连'], { visual: 'flow' }),
-      mkSlide('b'),
-      mkSlide('c'),
-      mkSlide('d')
-    ]
-  })
-  check(
-    '画面页带着要点时只摘画面，要点留着（还能讲）',
-    (() => {
-      const d = pruneSlideVisuals(flowWithBullets!, { flow: false, mindmap: false, figures: [] })
-      return d.slides[0].visual === undefined && d.slides[0].bullets.length === 1
-    })()
-  )
-  check(
-    '图不在库里 → figure 页降级（连路径一起摘掉，免得渲染时裂图）',
-    (() => {
-      const p = pruneSlideVisuals(withFigure!, {
-        flow: false,
-        mindmap: false,
-        figures: ['figures/p1/fig-9.png']
-      })
-      return p.slides[0].visual === undefined && p.slides[0].figure === undefined
-    })()
-  )
-  check(
-    '图在库里 → 保留 visual 与路径',
-    (() => {
-      const p = pruneSlideVisuals(withFigure!, {
-        flow: false,
-        mindmap: false,
-        figures: ['figures/p1/fig-2.png']
-      })
-      return p.slides[0].visual === 'figure' && p.slides[0].figure === 'figures/p1/fig-2.png'
-    })()
-  )
-
-  const withExtras = normalizeSlideDeck({
-    slides: [
-      mkSlide('a', ['x'], { note: '口播讲稿', source: '§3.2' }),
-      mkSlide('b', ['y'], { visual: 'mindmap' }),
-      mkSlide('c'),
-      mkSlide('d')
-    ]
-  })
-  const prunedExtras = pruneSlideVisuals(withExtras!, { flow: false, mindmap: false, figures: [] })
-  check(
-    '降级保留讲稿与出处',
-    prunedExtras.slides[0].note === '口播讲稿' && prunedExtras.slides[0].source === '§3.2'
-  )
-  check('思维导图页同样会被降级', prunedExtras.slides[1].visual === undefined)
-  check(
-    '降级不丢具体例子（例子是文字，和画面无关）',
-    (() => {
-      const d = normalizeSlideDeck({
-        slides: [
-          mkSlide('a', [], { visual: 'flow', example: { input: 'i', steps: ['一', '二'] } }),
-          mkSlide('b'),
-          mkSlide('c'),
-          mkSlide('d')
-        ]
-      })
-      return pruneSlideVisuals(d!, { flow: false, mindmap: false, figures: [] }).slides[0].example !== undefined
-    })()
-  )
-  check('降级后仍可序列化', (() => {
-    try {
-      matter.stringify('正文\n', { slides: noVisual })
-      return true
-    } catch {
-      return false
-    }
-  })())
-
-  /* ---- 必须有画面上台（模型经常忘，纯文字演示等于把论文念一遍） ---- */
-  const noFlowDeck = normalizeSlideDeck({
-    slides: [
-      mkSlide('为什么值得听'),
-      mkSlide('问题难在哪'),
-      mkSlide('我们的方法'),
-      mkSlide('关键证据'),
-      mkSlide('一句话总结')
-    ]
-  })
-  const flowed = ensureVisualSlides(noFlowDeck!, { flow: true, mindmap: false })
-  check('模型忘了安排流程图 → 兜底补一页', flowed.slides.some((s) => s.visual === 'flow'))
-  check(
-    '补的那页插在「讲方法」之后（刚听完文字，正是该看图的时候）',
-    flowed.slides[3].visual === 'flow' && flowed.slides[2].title === '我们的方法'
-  )
-  check(
-    '有流程图时不再补思维导图（两张图挤在一起反而乱）',
-    flowed.slides.filter((s) => s.visual).length === 1
-  )
-  check(
-    '一张图都凑不出来 → 用思维导图补一页当路标（放在开场之后）',
-    (() => {
-      const d = ensureVisualSlides(noFlowDeck!, { flow: false, mindmap: true })
-      return d.slides.length === 6 && d.slides[1].visual === 'mindmap'
-    })()
-  )
-  check(
-    '两张图都没有就不补（没有画面可用）',
-    ensureVisualSlides(noFlowDeck!, { flow: false, mindmap: false }).slides.length === 5
-  )
-  check(
-    '已经有画面页就不再补思维导图',
-    ensureVisualSlides(deck!, { flow: false, mindmap: true }).slides.filter((s) => s.visual).length === 1
-  )
-  check(
-    '已经有 flow 页就不重复补',
-    ensureVisualSlides(deck!, { flow: true, mindmap: false }).slides.filter((s) => s.visual === 'flow')
-      .length === 1
-  )
-  check(
-    '兜底页不超页数上限',
-    ensureVisualSlides(noFlowDeck!, { flow: true, mindmap: true }).slides.length <= 16
-  )
-
-  /* ---- 旧版讲稿页里内嵌的自画流程图（revision 3 起不再产出，读旧稿仍要认） ---- */
-  const ownFlow = normalizeSlideDeck({
-    slides: [
-      mkSlide('系统怎么跑', [], {
-        flow: {
-          title: '处理管线',
-          nodes: [
-            { id: 'n1', label: '读入输入' },
-            { id: 'n2', label: '检索候选' }
-          ],
-          edges: [{ from: 'n1', to: 'n2' }]
-        }
-      }),
-      mkSlide('b'),
-      mkSlide('c'),
-      mkSlide('d')
-    ]
-  })
-  check('自带的流程图被解析出来', ownFlow?.slides[0].flow?.nodes.length === 2)
-  check(
-    '有自带流程图就等同于点名了 flow 页（不必再多写一个 visual 字段）',
-    ownFlow?.slides[0].visual === 'flow'
-  )
-  check(
-    '画不成图（不足两个节点）就当没有，不写这个键',
-    normalizeSlideDeck({
-      slides: [
-        mkSlide('a', ['x'], { flow: { nodes: [{ id: 'n1', label: '只有一步' }] } }),
-        mkSlide('b'),
-        mkSlide('c'),
-        mkSlide('d')
-      ]
-    })?.slides[0].flow === undefined
-  )
-  check(
-    '自带的图不受「笔记里没有流程图」影响（它是这一页自己的内容）',
-    pruneSlideVisuals(ownFlow!, { flow: false, mindmap: false, figures: [] }).slides[0].flow?.nodes
-      .length === 2
-  )
-  check(
-    '自带流程图不会被兜底逻辑重复插一页',
-    ensureVisualSlides(ownFlow!, { flow: true, mindmap: true }).slides.filter((s) => s.visual === 'flow')
-      .length === 1
-  )
-
-  /* ---- 版本号：界面靠它认出「手里这份是旧版生成的稿」 ---- */
-  check(
-    '版本号会被沿用（读盘时补写，就等于把旧稿当成新稿）',
-    normalizeSlideDeck({
-      slides: [mkSlide('a'), mkSlide('b'), mkSlide('c'), mkSlide('d')],
-      revision: 2
-    })?.revision === 2
-  )
-  check('没写版本号的旧稿读出来就没有这个键', deck?.revision === undefined)
-  check(
-    '摘掉画面后什么都不剩的页被丢掉（只剩标题对着空屏最让人发愣）',
-    (() => {
-      const d = normalizeSlideDeck({
-        slides: [mkSlide('空画面页', [], { visual: 'flow' }), mkSlide('b'), mkSlide('c'), mkSlide('d')]
-      })
-      return pruneSlideVisuals(d!, { flow: false, mindmap: false, figures: [] }).slides.every(
-        (s) => s.title !== '空画面页'
-      )
-    })()
-  )
-  check('自带流程图能过 js-yaml 序列化', (() => {
-    try {
-      matter.stringify('正文\n', { slides: ownFlow })
-      return true
-    } catch {
-      return false
-    }
-  })())
-
-  /*
-   * 流程图专职 agent（revision 3）：画图从讲稿调用里拆出来，单独一次调用。
-   * 起因是真实故障 —— 讲稿 agent 被告知「可用画面」恒为空（availability 读错了
-   * 索引行），整份演示一张图都没有；顺带把「长 JSON 尾巴上顺手画图」这条最弱的
-   * 路径整个撤掉。这里锁的是拆分后的边界：讲稿 prompt 不再邀请模型画图。
-   */
-  check(
-    '讲稿 prompt 不再让模型自己画流程图（画图归专职 agent）',
-    !SLIDES_SYSTEM.includes('你自己照着原文画')
-  )
-  const slidesUser = buildSlidesUser({
-    title: '一篇论文',
-    year: 2026,
-    venue: 'NeurIPS',
-    categories: ['效率'],
-    sourceText: '正文',
-    noteExcerpt: '',
-    stage: { hasFlow: false, hasMindmap: true, figures: [] }
-  })
-  check(
-    '输出 JSON 的示例里不再有 flow 键（免得模型照着学）',
-    !slidesUser.includes('"flow":')
-  )
-  check('没有流程图时把「画不出」如实告诉模型，而不是只说「没有」', slidesUser.includes('画不出'))
-  check(
-    'flow 的 system prompt 保留「画不出就返回 null」的出口（防硬编假流程）',
-    METHOD_FLOW_SYSTEM.includes('flow 返回 null')
-  )
-  const flowUser = buildMethodFlowUser({ title: 'Jev-Mem', sourceText: '方法正文正文' })
-  check('flow 的输入带上标题与正文', flowUser.includes('Jev-Mem') && flowUser.includes('方法正文正文'))
-  check(
-    '包装形状 { flow: … } 取出本体',
-    (() => {
-      const body = { nodes: [{ id: 'n1', label: 'a' }] }
-      return pickFlowPayload({ flow: body }) === body
-    })()
-  )
-  check('模型直接吐 flow 对象时原样认下', (() => {
-    const body = { nodes: [] }
-    return pickFlowPayload(body) === body
-  })())
-  check('flow: null 传出去是 null（normalizeMethodFlow 会转成 undefined）', pickFlowPayload({ flow: null }) === null)
-  check(
-    '取出的本体直接喂 normalizeMethodFlow 能画成图',
-    normalizeMethodFlow(
-      pickFlowPayload({
-        flow: {
-          title: '写入流程',
-          nodes: [
-            { id: 'n1', label: '读入输入' },
-            { id: 'n2', label: '挂上记忆图', source: '§3.2' }
-          ],
-          edges: [{ from: 'n1', to: 'n2' }]
-        }
-      })
-    )?.nodes.length === 2
-  )
-
-  /* ---- 原文图的引用上下文（模型看不到图，只剩这条线索） ---- */
-  const refs = scanFigureReferences({
-    具体例子: '先看整体框架：\n\n![原文图表](../figures/p1/fig-1.png)\n\n左边是编码器。',
-    方法细节: '![原文图表](../figures/p1/fig-1.png)'
-  })
-  check('扫出笔记里引用的原文图', refs.length === 1 && refs[0].relPath === 'figures/p1/fig-1.png')
-  check('带上它出现在哪一节', refs[0].section === '具体例子')
-  check(
-    '带上图前后的文字（模型判断这张图画什么的唯一线索）',
-    refs[0].excerpt.includes('整体框架') && refs[0].excerpt.includes('左边是编码器')
-  )
-  eq(
-    '路径统一成相对知识库根（笔记被挪过目录也不失效）',
-    vaultFigurePathOf('../../figures/p1/fig-3.png'),
-    'figures/p1/fig-3.png'
-  )
-  check('外部地址不认（http / data 交给浏览器）', vaultFigurePathOf('https://x.com/a.png') === null)
-  check('没有图的章节扫不出东西', scanFigureReferences({ 自由笔记: '纯文字' }).length === 0)
-
-  /* ---------------- 25. 论文关系：手工连接的数据层 ---------------- */
-  console.log('')
-  console.log('── 25. 论文关系：容错 / 去重 / 优先级 ────────')
-
-  const link = (
-    to: string,
-    type = 'related',
-    extra: Record<string, unknown> = {}
-  ): Record<string, unknown> => ({ to, type, ...extra })
-
-  eq(
-    '正常一条原样通过',
-    normalizeLinks([link('p2', 'builds-on', { note: '改进了它的检索环节', by: 'user' })], 'p1'),
-    [{ to: 'p2', type: 'builds-on', by: 'user', note: '改进了它的检索环节' }]
-  )
-  check(
-    '不认识的类型收敛成「相关」，而不是把这条关系丢掉',
-    normalizeLinks([link('p2', 'zzz')], 'p1')[0]?.type === 'related'
-  )
-  check('缺类型的也收敛成「相关」', normalizeLinks([link('p2', '')], 'p1')[0]?.type === 'related')
-  check('指向自己的关系丢掉（A→A 是个环，没有信息）', normalizeLinks([link('p1', 'related')], 'p1').length === 0)
-  check('缺 to 的条目丢掉', normalizeLinks([link('', 'related')], 'p1').length === 0)
-  check('同一对 + 同一类型只留一条', normalizeLinks([link('p2'), link('p2')], 'p1').length === 1)
-  check(
-    '同一对但类型不同算两条（基于 / 结论冲突可以并存）',
-    normalizeLinks([link('p2', 'builds-on'), link('p2', 'contradicts')], 'p1').length === 2
-  )
-  check(
-    '同一对同类型时，人手工的那条优先（AI 提议不许覆盖你的判断）',
-    (() => {
-      const aiFirst = normalizeLinks(
-        [link('p2', 'related', { by: 'ai', note: 'AI 说的' }), link('p2', 'related', { by: 'user', note: '我说的' })],
-        'p1'
-      )
-      const userFirst = normalizeLinks(
-        [link('p2', 'related', { by: 'user', note: '我说的' }), link('p2', 'related', { by: 'ai', note: 'AI 说的' })],
-        'p1'
-      )
-      return aiFirst[0]?.note === '我说的' && userFirst[0]?.note === '我说的'
-    })()
-  )
-  check(
-    '人手工建立的排在前面（AI 提议是待办，别挤掉已确认的）',
-    (() => {
-      const list = normalizeLinks([link('p3', 'related', { by: 'ai' }), link('p9', 'related', { by: 'user' })], 'p1')
-      return list[0]?.to === 'p9' && list[1]?.to === 'p3'
-    })()
-  )
-  check(
-    'note / evidence 超长会截断',
-    (() => {
-      const list = normalizeLinks([link('p2', 'related', { note: 'x'.repeat(999), evidence: 'y'.repeat(999) })], 'p1')
-      return (list[0]?.note?.length ?? 0) === 200 && (list[0]?.evidence?.length ?? 0) === 300
-    })()
-  )
-  check('条数有上限（防脏数据把 frontmatter 撑爆）', (() => {
-    const many = Array.from({ length: 60 }, (_, i) => link(`p${i}`, 'related'))
-    return normalizeLinks(many, 'p1').length === 40
-  })())
-  check('非数组输入返回空（模型偶尔会吐出奇怪的东西）', normalizeLinks('nope').length === 0)
-  check('元素不是对象也不炸', normalizeLinks([null, 3, 'x', link('p2')], 'p1').length === 1)
-  check(
-    '没有可选键时键就不出现（js-yaml 序列化安全）',
-    (() => {
-      const one = normalizeLinks([link('p2', 'related')], 'p1')[0]
-      return one !== undefined && !('note' in one) && !('evidence' in one) && !('at' in one)
-    })()
-  )
-  check('关系键能区分同目标不同类型', linkKey({ to: 'p2', type: 'builds-on' }) !== linkKey({ to: 'p2', type: 'contradicts' }))
-
-  /* ---------------- 26. 关系判定：数据给候选，模型负责说不 ---------------- */
-  console.log('')
-  console.log('── 26. 关系判定（AI 找关系） ──────────────')
-
-  check('system 要求合法 JSON（否则解析链会抛）', LINKS_SYSTEM.includes('合法 JSON'))
-  check(
-    'system 把「不确定就判不成立」写成第一条规则',
-    LINKS_SYSTEM.includes('不确定就判不成立'),
-    '这是这个 agent 的核心：宁可漏，不要错'
-  )
-  check(
-    'system 要求依据必须指着具体东西（防「高度相关」这类空话）',
-    LINKS_SYSTEM.includes('具体东西') && LINKS_SYSTEM.includes('空话')
-  )
-
-  const judgeFrom = {
-    title: 'GraphRAG: 用图结构做检索',
-    year: 2025,
-    venue: 'ACL',
-    tldr: '把知识图谱接进 RAG 的检索环节',
-    digest: '【方法细节】\n用实体图做多跳检索，代价是索引很重。'
-  }
-  const judgeTo = {
-    title: 'LightRAG: 轻量图检索',
-    year: 2024,
-    tldr: '用双层图索引降低图检索的成本',
-    digest: '【局限与未来工作】\n没处理跨语言场景。'
-  }
-
-  const judgePrompt = buildLinkJudgePrompt({
-    from: judgeFrom,
-    to: judgeTo,
-    shared: ['HotpotQA', 'Recall@10'],
-    existing: ['对比 / 竞争（你已确认）']
-  })
-  check(
-    'prompt 带上两篇的标题',
-    judgePrompt.includes(judgeFrom.title) && judgePrompt.includes(judgeTo.title)
-  )
-  check(
-    'prompt 带上数据判定出的共享要素',
-    judgePrompt.includes('HotpotQA') && judgePrompt.includes('Recall@10')
-  )
-  check(
-    'prompt 说清共享要素只是「值得看」，不是关系成立的证据',
-    judgePrompt.includes('不构成关系成立的证据'),
-    '否则模型会把「共享一个数据集」直接当成关系'
-  )
-  check(
-    'prompt 列出全部六种关系类型（只能从词表选）',
-    LINK_TYPES.every((t) => judgePrompt.includes(`\`${t}\``))
-  )
-  check('prompt 带上已有关系（避免重复提议）', judgePrompt.includes('对比 / 竞争（你已确认）'))
-  check(
-    '候选没精读过时明说「不要臆测」',
-    buildLinkJudgePrompt({
-      from: judgeFrom,
-      to: { ...judgeTo, digest: '', tldr: '' },
-      shared: ['X']
-    }).includes('不要臆测')
-  )
-
-  eq(
-    '合法判定原样通过',
-    normalizeVerdict({
-      ok: true,
-      type: 'builds-on',
-      note: '承接了它的检索环节',
-      evidence: '两篇都在做图检索的多跳'
-    }),
-    {
-      ok: true,
-      type: 'builds-on',
-      evidence: '两篇都在做图检索的多跳',
-      note: '承接了它的检索环节'
-    }
-  )
-  check(
-    '判不成立时带上理由（只用于日志，不落盘）',
-    normalizeVerdict({ ok: false, reason: '只是一起用了同一个数据集' }).ok === false
-  )
-  check(
-    '类型不在词表里 → 当不成立',
-    normalizeVerdict({ ok: true, type: 'seems-related', evidence: 'x' }).ok === false,
-    '宁缺勿滥：说不清的线不进图'
-  )
-  check('没给依据 → 当不成立', normalizeVerdict({ ok: true, type: 'builds-on' }).ok === false)
-  check(
-    '模型把字段写成 relation 也认（保底兼容）',
-    normalizeVerdict({ relation: true, type: 'inspires', evidence: 'x' }).ok
-  )
-  check(
-    '没给 note 时键就不出现（js-yaml 序列化安全）',
-    (() => {
-      const verdict = normalizeVerdict({ ok: true, type: 'related', evidence: 'x' })
-      return verdict.ok && !('note' in verdict)
-    })()
-  )
-  check(
-    '模型包在代码块里返回也能解析（走 extractJson）',
-    (() => {
-      const verdict = normalizeVerdict(
-        extractJson('```json\n{"ok": true, "type": "contradicts", "note": "n", "evidence": "e"}\n```')
-      )
-      return verdict.ok && verdict.type === 'contradicts'
-    })()
-  )
-
-  const proposed = verdictToLink(
-    normalizeVerdict({ ok: true, type: 'inspires', note: '可搬', evidence: '§4.2' }),
-    'p2',
-    '2026-09-25T00:00:00.000Z'
-  )
-  check(
-    '判定成立 → 写成 by:ai 的提议（要人确认才算数）',
-    proposed?.by === 'ai' && proposed.to === 'p2' && proposed.type === 'inspires'
-  )
-  check('不成立的判定不产生链接', verdictToLink({ ok: false }, 'p2', 'now') === null)
-  check(
-    '提议经落盘规整后仍带 by:ai、依据与那句人话',
-    (() => {
-      const kept = normalizeLinks([proposed], 'p1')[0]
-      return kept?.by === 'ai' && kept.evidence === '§4.2' && kept.note === '可搬'
-    })()
-  )
-
-  const digest = pickLinkDigest({
-    一句话总结: '- 只该出现在 tldr 里',
-    核心问题与动机: '- **要解决什么问题**：图检索太贵，得把索引成本压下来',
-    方法细节: '- 双层图索引：先用实体级图粗筛，再用段落级图精排，成本降到 1/5',
-    '写作手法 · Abstract': '- 不该被喂给关系判定（那是写作维度的事）',
-    局限与未来工作: '   ',
-    可迁移到我的研究: 'x'
-  })
-  check(
-    'digest 只挑与关系判断有关的章节',
-    digest.includes('双层图索引') && !digest.includes('写作手法')
-  )
-  check(
-    'digest 跳过空白与过短的章节',
-    !digest.includes('局限与未来工作') && !digest.includes('可迁移到我的研究')
-  )
-  check('一句话总结不由 digest 负责（它单独走 tldr）', !digest.includes('只该出现在 tldr 里'))
-  check('超长章节会被截断', pickLinkDigest({ 方法细节: 'x'.repeat(2000) }).includes('后略'))
-
-  /* ---------------- 27. 研究想法：从已确认的关系组合出可验证的题目 ---------------- */
-  console.log('')
-  console.log('── 27. 研究想法（组合原料与题目约束） ──────')
-
-  const ideaPaper = (id: string, title: string, extra: Partial<IdeaSeedPaper> = {}): IdeaSeedPaper => ({
-    id,
-    title,
-    year: 2024,
-    tldr: `${title} 的一句话总结`,
-    method: '把检索环节换成图结构：先用实体图粗筛，再用段落图精排。',
-    limitation: '没处理跨语言场景，中文检索效果未知。',
-    transferable: '它的粗筛思路可以搬到长文摘要的排序上。',
-    ...extra
-  })
-  const confirmed = (to: string, type: PaperLinkType, note?: string): PaperLink => ({
-    to,
-    type,
-    by: 'user',
-    ...(note ? { note } : {})
-  })
-
-  const seedInput: IdeaSeedPaper[] = [
-    ideaPaper('p1', 'GraphRAG', {
-      links: [
-        confirmed('p2', 'builds-on', '承接了它的检索环节'),
-        // AI 提议不算数：想法要站在你自己确认过的判断上
-        { to: 'p3', type: 'inspires', by: 'ai' }
-      ]
-    }),
-    ideaPaper('p2', 'LightRAG', { links: [confirmed('p1', 'contradicts')] }),
-    // 两边都没写下任何原料 → 不生成（省一次调用，也免得得到正确的废话）
-    ideaPaper('p3', 'EmptyNote', {
-      method: '',
-      limitation: '',
-      transferable: '',
-      links: [confirmed('p4', 'inspires')]
-    }),
-    ideaPaper('p4', 'AlsoEmpty', { method: '', limitation: '', transferable: '' })
-  ]
-  const seeds = buildIdeaSeeds(seedInput)
-  check('一对论文只出一条组合单元（两个方向算同一对）', seeds.length === 1, `seeds=${seeds.length}`)
-  check('AI 提议的关系不参与组合', seeds[0]?.relations.every((r) => r.type !== 'inspires'))
-  check(
-    'from 固定取 id 小的那篇（同样的库跑两次得到同一份文档）',
-    seeds[0]?.from.id === 'p1' && seeds[0]?.to.id === 'p2'
-  )
-  check(
-    '两个方向的关系都收进同一条，并标出方向',
-    seeds[0]?.relations.length === 2 &&
-      seeds[0].relations.some((r) => r.direction === 'out' && r.type === 'builds-on') &&
-      seeds[0].relations.some((r) => r.direction === 'in' && r.type === 'contradicts')
-  )
-  check(
-    '两边都没写原料的关系不生成（空笔记上长不出题目）',
-    !seeds.some((s) => s.from.id === 'p3' || s.to.id === 'p3')
-  )
-
-  const rankedSeeds = buildIdeaSeeds([
-    ideaPaper('p1', 'A', { links: [confirmed('p2', 'builds-on')] }),
-    ideaPaper('p2', 'B'),
-    ideaPaper('p5', 'C', { links: [confirmed('p6', 'contradicts')] }),
-    ideaPaper('p6', 'D')
-  ])
-  check(
-    '「结论冲突」排在「基于/改进」前面（更容易长成题目）',
-    rankedSeeds[0]?.from.id === 'p5',
-    rankedSeeds.map((s) => s.from.id).join(',')
-  )
-  check(
-    '一次组合的条数有上限',
-    buildIdeaSeeds(seedInput.concat(rankedSeeds.flatMap((s) => [s.from, s.to])), 1).length === 1
-  )
-
-  const ideaPrompt = buildIdeaPrompt(seeds[0])
-  check(
-    'prompt 带上两篇的标题与年份',
-    ideaPrompt.includes('GraphRAG') && ideaPrompt.includes('LightRAG')
-  )
-  check(
-    'prompt 带上关系类型与你自己写下的那句理由',
-    ideaPrompt.includes('基于 / 改进') && ideaPrompt.includes('承接了它的检索环节')
-  )
-  check(
-    'prompt 把「最小验证实验」与「反证条件」写成必填项',
-    ideaPrompt.includes('最小验证实验') && ideaPrompt.includes('反证条件')
-  )
-  check(
-    'prompt 带上实验画像（最小实验可以直接借用）',
-    (() => {
-      const withExp = buildIdeaSeeds([
-        ideaPaper('p9', 'Exp', {
-          exp: { ...emptyExperimentProfile(), datasets: ['HotpotQA'], baselines: ['DPR'], metrics: ['EM'] },
-          links: [confirmed('p10', 'inspires')]
-        }),
-        ideaPaper('p10', 'Exp2')
-      ])
-      const prompt = buildIdeaPrompt(withExp[0])
-      return prompt.includes('HotpotQA') && prompt.includes('DPR') && prompt.includes('实验设置')
-    })()
-  )
-  check(
-    '没写的章节明说「不要臆测」（留白会让模型自己编）',
-    (() => {
-      const thin = buildIdeaSeeds([
-        ideaPaper('p11', 'Thin', { limitation: '', transferable: '', links: [confirmed('p12', 'inspires')] }),
-        ideaPaper('p12', 'Thin2')
-      ])
-      return buildIdeaPrompt(thin[0]).includes('（没写，不要臆测）')
-    })()
-  )
-  check('system 要求合法 JSON', IDEAS_SYSTEM.includes('合法 JSON'))
-  check(
-    'system 把「无法反证就不是题目」写进第一条规则',
-    IDEAS_SYSTEM.includes('无法反证的方向不是题目'),
-    '这是这个 agent 存在的意义：抵抗听起来很美'
-  )
-
-  eq(
-    '完整的想法原样通过',
-    normalizeIdea({
-      ok: true,
-      title: '把图检索的粗筛接到长文摘要上',
-      hypothesis: '用实体图做粗筛能提升长文摘要的召回',
-      why: '长文摘要的瓶颈在候选太长',
-      minimalTest: '在 HotpotQA 上换掉粗筛层，比 DPR 基线看 EM',
-      falsify: 'EM 相对基线没有提升（±0.5 以内）就说明粗筛没起作用',
-      risk: '需要先有实体图'
-    }),
-    {
-      ok: true,
-      title: '把图检索的粗筛接到长文摘要上',
-      hypothesis: '用实体图做粗筛能提升长文摘要的召回',
-      minimalTest: '在 HotpotQA 上换掉粗筛层，比 DPR 基线看 EM',
-      falsify: 'EM 相对基线没有提升（±0.5 以内）就说明粗筛没起作用',
-      why: '长文摘要的瓶颈在候选太长',
-      risk: '需要先有实体图'
-    }
-  )
-  check(
-    '缺反证条件 → 当不成立（方向不是题目）',
-    (() => {
-      const idea = normalizeIdea({ ok: true, title: 't', hypothesis: 'h', minimalTest: 'm' })
-      return idea.ok === false && (idea.reason ?? '').includes('反证条件')
-    })()
-  )
-  check(
-    '缺最小验证实验 → 当不成立',
-    normalizeIdea({ ok: true, title: 't', hypothesis: 'h', falsify: 'f' }).ok === false
-  )
-  check(
-    '模型判不成立时保留理由（写进文档末尾，说明缺什么）',
-    normalizeIdea({ ok: false, reason: 'B 的局限一节是空的，看不出要解决什么' }).reason ===
-      'B 的局限一节是空的，看不出要解决什么'
-  )
-  check(
-    '字段名换写法也认（minimal_test / counter）',
-    normalizeIdea({ ok: true, title: 't', hypothesis: 'h', minimal_test: 'm', counter: 'f' }).ok
-  )
-  check(
-    '没给 why / risk 时键就不出现（js-yaml 序列化安全）',
-    (() => {
-      const idea = normalizeIdea({ ok: true, title: 't', hypothesis: 'h', minimalTest: 'm', falsify: 'f' })
-      return idea.ok && !('why' in idea) && !('risk' in idea)
-    })()
-  )
-
-  const docIdea = {
-    ok: true,
-    title: '把图检索的粗筛接到长文摘要上',
-    hypothesis: '用实体图做粗筛能提升长文摘要的召回',
-    minimalTest: '在 HotpotQA 上换掉粗筛层，比 DPR 基线看 EM',
-    falsify: 'EM 相对基线没有提升（±0.5 以内）'
-  }
-  const doc = renderIdeaDoc(
-    [{ seed: seeds[0], idea: docIdea }],
-    [{ seed: seeds[0], idea: { ok: false, reason: '材料只够写一句正确的话' } }],
-    { at: '2026-09-25T00:00:00.000Z', confirmedLinks: 7 }
-  )
-  check('文档带上条目编号与四项内容', doc.includes('## 1. 把图检索的粗筛接到长文摘要上'))
-  check('文档四个小节齐全', ['**假设**', '**最小验证实验**', '**反证条件**'].every((k) => doc.includes(k)))
-  check(
-    '来源与依据由数据渲染，不转述模型的话',
-    doc.includes('GraphRAG') && doc.includes('LightRAG') && doc.includes('基于 / 改进') && doc.includes('承接了它的检索环节')
-  )
-  check('文档标出「只吃已确认的关系」（AI 提议不参与）', doc.includes('你确认过的'))
-  check('没能组合的关系单列一节并写明缺什么', doc.includes('没能组合成题目的关系') && doc.includes('材料只够写一句正确的话'))
-  check(
-    '一条都没成时给出下一步（而不是留一份空文档）',
-    renderIdeaDoc([], [], { at: 'now', confirmedLinks: 3 }).includes('没有组合出可验证的题目')
-  )
-  check('文档以换行收尾（Markdown 落盘惯例）', doc.endsWith('\n'))
-
-  /* ---------------- 28. 组合分析：一组论文有没有组合创新的空间 ---------------- */
-  console.log('')
-  console.log('── 28. 组合分析（线索 / 判空 / 蓝图） ──────')
-
-  const comboPaper = (id: string, title: string, extra: Partial<ComboPaper> = {}): ComboPaper => ({
-    id,
-    title,
-    year: 2024,
-    tldr: `${title} 做了什么`,
-    method: '用双层图索引做检索：先实体级粗筛，再段落级精排。',
-    limitation: '没处理跨语言场景。',
-    // 必须真有内容（≥20 字）：太短会被数据侧当成「没写」，那是刻意的阈值
-    transferable: '粗筛的思路可以搬到长文摘要的排序上，值得先在小样本上试一次。',
-    ...extra
-  })
-
-  const members: ComboPaper[] = [
-    comboPaper('c1', 'GraphRAG', {
-      entities: [
-        { name: 'HotpotQA', kind: 'dataset' },
-        { name: 'EntityGraph', kind: 'method' },
-        { name: '多模态', kind: 'concept' }
-      ],
-      exp: { ...emptyExperimentProfile(), datasets: ['HotpotQA'], metrics: ['EM'], baselines: ['DPR'] },
-      links: [
-        { to: 'c2', type: 'contradicts', by: 'user', note: '结论互相矛盾' },
-        { to: 'zzz', type: 'related', by: 'user' }
-      ]
-    }),
-    comboPaper('c2', 'LightRAG', {
-      transferable: '',
-      entities: [
-        { name: 'HotpotQA', kind: 'dataset' },
-        { name: '多模态', kind: 'concept' },
-        { name: 'TwoLevelIndex', kind: 'method' }
-      ],
-      exp: { ...emptyExperimentProfile(), datasets: ['MuSiQue'], metrics: ['F1'], baselines: ['DPR'] }
-    })
-  ]
-
-  const comboRelations = collectComboRelations(members)
-  check(
-    '组内关系只收成员之间的（指向组外的不算）',
-    comboRelations.length === 1 && comboRelations[0].type === 'contradicts',
-    `relations=${comboRelations.length}`
-  )
-
-  const signals = computeComboSignals(members)
-  const signalKinds = new Set(signals.map((s) => s.kind))
-  check(
-    '共享的具体技术要素形成线索',
-    signalKinds.has('shared-tech') && signals.some((s) => s.text.includes('HotpotQA'))
-  )
-  check('只有一篇用到的要素算互补原料', signalKinds.has('distinct-tech'))
-  check(
-    'concept 这类虚的要素不参与（否则「都关注 XX」也会变成线索）',
-    !signals.some((s) => s.text.includes('多模态'))
-  )
-  check(
-    '数据集错位形成线索',
-    signals.some((s) => s.kind === 'experiment-gap' && s.text.includes('MuSiQue'))
-  )
-  check(
-    '指标不一致形成线索（口径本身可能是个问题）',
-    signals.some((s) => s.kind === 'experiment-gap' && s.text.includes('F1'))
-  )
-  check('共用基线形成线索', signals.some((s) => s.text.includes('共用基线')))
-  check('组内结论冲突形成线索', signalKinds.has('conflict'))
-  check(
-    '只有真写了可迁移点的才进线索',
-    (() => {
-      const one = signals.find((s) => s.kind === 'transferable')?.text ?? ''
-      return one.includes('GraphRAG') && !one.includes('LightRAG')
-    })()
-  )
-
-  const comboPrompt = buildComboPrompt({ papers: members, relations: comboRelations, signals })
-  check('prompt 带上每一篇的标题', members.every((p) => comboPrompt.includes(p.title)))
-  check(
-    'prompt 带上该组已有的关系与那句为什么',
-    comboPrompt.includes('结论冲突') && comboPrompt.includes('结论互相矛盾')
-  )
-  check('prompt 明说线索不是创新空间的证据', comboPrompt.includes('不是创新空间的证据'))
-  check(
-    '组内没有关系时告诉模型「这不等于没有空间」',
-    buildComboPrompt({ papers: members, relations: [], signals }).includes('还没有建立过任何关系')
-  )
-  check('system 允许判定「没有组合空间」', COMBO_SYSTEM.includes('允许说没有空间'))
-  check(
-    'system 禁止「把 A 与 B 结合」这类空话',
-    COMBO_SYSTEM.includes('把 A 与 B 结合'),
-    '组合必须落到具体机制上'
-  )
-  check('system 要求合法 JSON', COMBO_SYSTEM.includes('合法 JSON'))
-
-  const fullCombo = normalizeCombo({
-    space: 'promising',
-    verdict: '两篇的索引层可以互换',
-    angles: [
-      {
-        title: '把粗筛换成实体图',
-        hypothesis: 'h',
-        why: 'w',
-        from: ['GraphRAG'],
-        minimalTest: 'm',
-        falsify: 'f'
-      }
-    ],
-    composite: { title: 'ct', contribution: 'c', skeleton: 's', experiments: 'e', missing: 'mx' }
-  })
-  check(
-    '完整结果原样通过',
-    fullCombo.ok && fullCombo.space === 'promising' && fullCombo.angles.length === 1 && !!fullCombo.composite
-  )
-  check(
-    '角度缺反证条件就被丢掉（与「研究想法」同一把尺子）',
-    normalizeCombo({ angles: [{ title: 't', hypothesis: 'h', minimalTest: 'm' }] }).ok === false
-  )
-  check(
-    '既没角度也没蓝图 → 当没有空间，并给出理由',
-    (() => {
-      const result = normalizeCombo({ space: 'promising', verdict: 'v' })
-      return result.ok === false && !!result.reason
-    })()
-  )
-  check(
-    '蓝图缺「还缺什么」就不算蓝图（那一行通常比结论更有用）',
-    normalizeCombo({
-      angles: [],
-      composite: { title: 't', contribution: 'c', skeleton: 's', experiments: 'e' }
-    }).ok === false
-  )
-  check(
-    '认不出的 space 不硬塞',
-    normalizeCombo({
-      space: 'maybe',
-      angles: [{ title: 't', hypothesis: 'h', minimalTest: 'm', falsify: 'f' }]
-    }).space === undefined
-  )
-  check('模型返回垃圾不崩', normalizeCombo(null).ok === false)
-
-  const comboDoc = renderComboDoc({
-    papers: members,
-    relations: comboRelations,
-    signals,
-    analysis: fullCombo,
-    at: '2026-09-25T00:00:00.000Z'
-  })
-  check('文档标题列出成员', comboDoc.startsWith('# 组合分析：') && comboDoc.includes('GraphRAG'))
-  check(
-    '文档带总判断与空间评价',
-    comboDoc.includes('两篇的索引层可以互换') && comboDoc.includes('有值得做的地方')
-  )
-  check(
-    '角度四项齐全',
-    ['**假设**', '**最小验证实验**', '**反证条件**'].every((k) => comboDoc.includes(k))
-  )
-  check(
-    '组合论文分析单独成节并写明还缺什么',
-    comboDoc.includes('如果把它们合成一篇') && comboDoc.includes('**还缺什么**')
-  )
-  check(
-    '关系与线索单列，并标注线索不是创新空间',
-    comboDoc.includes('结论冲突') && comboDoc.includes('不是创新空间')
-  )
-  check(
-    '没有空间时给出下一步（而不是一份空文档）',
-    renderComboDoc({
-      papers: members,
-      relations: [],
-      signals: [],
-      analysis: { ok: false, angles: [], reason: '它们是同一条赛道的不同实现' },
-      at: 'now'
-    }).includes('这次没有找到可做的组合角度')
-  )
-  check('文档以换行收尾', comboDoc.endsWith('\n'))
 
   console.log('')
   console.log(`${pass}/${pass + fail} 通过`)

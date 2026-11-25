@@ -16,9 +16,16 @@
 
 export type LensId =
   | 'overview'
+  /** 按用户的「读论文风格」skill 写一整篇导读 */
+  | 'deepread'
   | 'writing'
   /** writing 的后半：方法与实验那两个写作章节 + 原文摘录 */
   | 'writingMethod'
+  /**
+   * 「写作逻辑卡」：只抽结构化数据（故事线 / 引用功能 / 优势对齐 / 贡献 / 方法论证链），
+   * 不写任何章节。与 writing 的分工见 main/lenses/writingLogic.ts。
+   */
+  | 'writingLogic'
   | 'english'
   | 'visuals'
   /** 把方法讲到能照着复现（顺带产出方法流程图） */
@@ -31,7 +38,6 @@ export type LensId =
   | 'experiment'
   | 'method'
   | 'limitations'
-  | 'graph'
 
 export interface LensMeta {
   id: LensId
@@ -42,7 +48,12 @@ export interface LensMeta {
   sections: string[]
   /** 是否需要原文（否则可以只靠已有笔记跑） */
   needsSource: boolean
-  /** 建议的最大输出 token */
+  /**
+   * 这个维度写满需要的输出预算。它是**下限**而不是上限：
+   * 实际发出去的 max_tokens 取它与全局配置里较大者，再由 LENS_TOKEN_CEILING 兜住
+   * —— 推理型模型的思考 token 也从这里扣，所以全局值常常需要比「正文体积」大得多。
+   * 见 main/lenses/run.ts 的 lensTokenBudget。
+   */
   maxTokens: number
   /** 新论文默认是否启用 */
   defaultEnabled: boolean
@@ -59,9 +70,25 @@ export const LENS_META: LensMeta[] = [
     defaultEnabled: true
   },
   {
+    /*
+     * 一整篇长文，按 skills/读论文风格.md 的口吻和结构写。
+     * 和其余维度的分工：它们各自把一个侧面拆到能复用（固定章节、能跨论文聚合），
+     * 这一篇负责「从头到尾讲明白」—— 碎片拼不出导师讲课的那条线。
+     */
+    id: 'deepread',
+    label: '导师精读',
+    description:
+      '按「六个核心问题 → 留坑点 → 可带走的规律」写一整篇导读，口吻和结构来自知识库里的 skills/读论文风格.md。',
+    sections: ['导师精读'],
+    needsSource: true,
+    maxTokens: 16384,
+    defaultEnabled: true
+  },
+  {
     id: 'writing',
     label: '写作手法 · 开篇',
-    description: '逐节拆 Abstract / Introduction / Related Work 的组织与句式。',
+    description:
+      '逐节拆 Abstract / Introduction / Related Work 的组织与句式；Introduction 额外拆贡献段的「主张 → 缺口 → 证据」。',
     sections: ['写作手法 · Abstract', '写作手法 · Introduction', '写作手法 · Related Work'],
     needsSource: true,
     maxTokens: 4096,
@@ -86,6 +113,23 @@ export const LENS_META: LensMeta[] = [
     defaultEnabled: true
   },
   {
+    /*
+     * 这个维度**不写章节**，产物是 frontmatter 里的结构化卡片。
+     *
+     * 为什么不并进 writing：writing 已经有过两次「一次写太多被截断、截断抢救
+     * 只保住最后一节」的记录。再往同一个 JSON 里塞十几条引用记录，代价是散文
+     * 那一侧也一起空掉；拆开之后两边的失败互不牵连。
+     */
+    id: 'writingLogic',
+    label: '写作逻辑卡',
+    description:
+      '抽成可跨篇比较的结构：故事线类型、Intro 逐段在回答哪个疑问、每条被引工作是靶子还是垫脚石、反衬出哪个优势、贡献怎么回扣缺口、方法按什么顺序被论证。',
+    sections: [],
+    needsSource: true,
+    maxTokens: 4096,
+    defaultEnabled: true
+  },
+  {
     id: 'english',
     label: '英语写作短语',
     description: '抽取文中可复用的英文小短语，按功能分类，直接攒成自己的表达库。',
@@ -95,13 +139,24 @@ export const LENS_META: LensMeta[] = [
     defaultEnabled: true
   },
   {
+    /*
+     * 默认**关闭**。
+     *
+     * 它产出的「图表与可视化设计」在实际使用里很少被回头看，却是每次精读都跑
+     * 一遍的固定成本。想用的人到 设置 → 分析维度 打开即可，历史产出不会丢。
+     *
+     * 注意：真正决定「默认跑不跑」的是 settings.disabledLenses（见 settings.ts
+     * 的 DEFAULT_SETTINGS 与 settingsVersion 迁移），这个字段只是元数据说明。
+     * 原因是 enabledLensIds 走的是黑名单语义 —— 只改这里对老用户完全无效，
+     * 而让 enabledLensIds 同时看 defaultEnabled，会导致用户手动打开后又被过滤掉。
+     */
     id: 'visuals',
     label: '图表与可视化设计',
     description: '同样的拆解思路换个场景：看它的图、表、流程是怎么设计的。',
     sections: ['图表与可视化设计'],
     needsSource: true,
     maxTokens: 4096,
-    defaultEnabled: true
+    defaultEnabled: false
   },
   {
     id: 'methodDetail',
@@ -153,7 +208,8 @@ export const LENS_META: LensMeta[] = [
      * 喂给「实验对比」表格的结构化字段会和两段散文一起丢。
      */
     label: '实验画像抽取',
-    description: '结构化抽取实验设置：数据集 / 基线 / 指标 / 消融组数 / 重复次数 / 方差 / 开源闭源 / 算力。',
+    description:
+      '结构化抽取实验设置：数据集 / 基线 / 指标 / 消融组数 / 重复次数 / 方差 / 开源闭源 / 算力。',
     sections: [],
     needsSource: true,
     maxTokens: 2048,
@@ -175,15 +231,6 @@ export const LENS_META: LensMeta[] = [
     sections: ['局限与未来工作'],
     needsSource: true,
     maxTokens: 2048,
-    defaultEnabled: true
-  },
-  {
-    id: 'graph',
-    label: '知识图谱抽取',
-    description: '抽出论文里的实体（模型/数据集/任务/方法）与它们之间的关系，用于跨论文建图。',
-    sections: [],
-    needsSource: true,
-    maxTokens: 4096,
     defaultEnabled: true
   }
 ]
@@ -223,6 +270,38 @@ export interface LensRunEntry {
    * 而实际上只落了 1 节 —— 那正是这个警告要防的事。
    */
   note?: string
+  /** 这个维度吃掉多少模型用量；老记录里没有（读取处按可选处理） */
+  usage?: LensRunUsage
+}
+
+/**
+ * 模型用量。
+ *
+ * 为什么要落盘：`usage` 过去从接口拿回来就丢了，于是「这次精读花了多少 token」
+ * 「哪个维度最费钱」「重试了几次」全都答不上来。有了它，批量精读前能预估、
+ * 跑完能对账、换模型后能比较成本 —— 这是「改 prompt / 换模型到底值不值」
+ * 的唯一依据。
+ */
+export interface LensRunUsage {
+  /** 用到的模型；一次运行里混用过多个会以「,」相连 */
+  model: string
+  /**
+   * prompt 组合指纹（各次调用 system 指纹的再哈希）。
+   * 任何一个维度的 prompt 改了它就会变，见 main/llm.ts 的 fingerprint。
+   */
+  prompt: string
+  promptTokens: number
+  completionTokens: number
+  /** 端到端耗时合计，含重试与重试前的退避等待 */
+  elapsedMs: number
+  /** 实际发出的请求数（比调用数多，说明发生过重试） */
+  requests: number
+  /** 调用次数（一个维度算一次） */
+  calls: number
+  /** 撞上 max_tokens 被截断的调用数 */
+  truncated: number
+  /** 失败的调用数 —— 它们照样计费，所以要单独可见 */
+  failed: number
 }
 
 /**
@@ -240,6 +319,70 @@ export interface LensRunRecord {
   /** 给用户看的一句话 */
   message: string
   lenses: LensRunEntry[]
+  /**
+   * 本次运行的用量合计。
+   *
+   * 口径是「**本次**」而不是「这篇论文累计」：重跑失败的维度时，这里只统计这次
+   * 重跑的消耗 —— 累计值会把同一次精读反复计入，拿来估成本只会误导。
+   */
+  usage?: LensRunUsage
+}
+
+/**
+ * 按设置里的单价估算花费（单位随单价，通常填「元 / 百万 token」）。
+ *
+ * 单价由用户自己填 —— 不同服务商差几倍，代码里写死一个必然错。未填时返回 null：
+ * 宁可不显示，也不要甩一个「¥0.00」让人以为免费。
+ */
+export function estimateCost(
+  usage: Pick<LensRunUsage, 'promptTokens' | 'completionTokens'>,
+  priceInput?: number,
+  priceOutput?: number
+): number | null {
+  const pin = priceInput ?? 0
+  const pout = priceOutput ?? 0
+  if (pin <= 0 && pout <= 0) return null
+  return (usage.promptTokens / 1e6) * pin + (usage.completionTokens / 1e6) * pout
+}
+
+/** 花费的显示文案：极小值也要看得见（「¥0.00」看起来像没花钱） */
+export function formatCost(cost: number | null): string {
+  if (cost == null) return ''
+  if (cost <= 0) return '¥0'
+  return cost < 0.01 ? '不足 ¥0.01' : `¥${cost.toFixed(2)}`
+}
+
+/** token 数的显示文案：上万之后折成「万」，否则一长串数字读不出量级 */
+export function formatTokens(n: number): string {
+  if (n < 10000) return n.toLocaleString('zh-CN')
+  return `${(n / 10000).toFixed(1)} 万`
+}
+
+/** 耗时的显示文案（毫秒进、人话出） */
+export function formatDuration(ms: number): string {
+  if (ms < 1000) return `${Math.round(ms)} 毫秒`
+  const s = Math.round(ms / 1000)
+  if (s < 60) return `${s} 秒`
+  const m = Math.floor(s / 60)
+  const rest = s % 60
+  return rest ? `${m} 分 ${rest} 秒` : `${m} 分`
+}
+
+/**
+ * 从运行记录里剔除已经下线的维度（例如 `graph`），并据剩下的维度重算状态。
+ *
+ * 不剔除的话，下线维度的失败会永远挂在状态条上，「只重试失败的」又把这个
+ * 已不存在的 id 发给主进程 —— 结果只会得到「没有启用任何分析维度」。
+ * 整个流程失败 / 取消的记录不重算：那类状态不是由单个维度决定的。
+ */
+export function pruneRetiredLenses(record: LensRunRecord): LensRunRecord {
+  const lenses = record.lenses.filter((l) => META_MAP.has(l.id))
+  if (lenses.length === record.lenses.length) return record
+  if (record.status !== 'partial' || !lenses.length) return { ...record, lenses }
+
+  const failed = lenses.filter((l) => !l.ok).length
+  if (failed) return { ...record, lenses }
+  return { ...record, lenses, status: 'ok', message: `${lenses.length} 个维度全部完成` }
 }
 
 export const RUN_STATUS_LABEL: Record<LensRunRecord['status'], string> = {
@@ -268,14 +411,7 @@ export function enabledLensIds(disabled: LensId[] | undefined): LensId[] {
  * 这是一份**冻结的历史快照，永远不要再改**：它的唯一用途是把老配置里的
  * 白名单翻译成黑名单，改动它会让已经迁移过的用户配置错乱。
  */
-const LEGACY_LENS_IDS: LensId[] = [
-  'overview',
-  'writing',
-  'english',
-  'visuals',
-  'experiment',
-  'graph'
-]
+const LEGACY_LENS_IDS: LensId[] = ['overview', 'writing', 'english', 'visuals', 'experiment']
 
 /**
  * 把老版本的 enabledLenses（白名单）翻译成 disabledLenses（黑名单）。
@@ -461,4 +597,114 @@ export interface PaperGraph {
   relations: GraphRelation[]
   /** 抽取时间 */
   extractedAt?: string
+}
+
+const KIND_SET = new Set<string>(ENTITY_KINDS)
+const RELATION_SET = new Set<string>(RELATION_TYPES)
+
+/**
+ * 从笔记 frontmatter 读回来的图谱数据做归一化。
+ *
+ * 为什么必须有这一步：frontmatter 是用户可手改的 YAML，形状不可能保证 ——
+ * 数组写成标量、kind 拼错、relations 引用了不存在的实体，都会发生。不归一化的话，
+ * 一个手改过的字段就能让整篇图谱在读取时崩掉；而 frontmatter 恰恰是图谱数据的
+ * **唯一持久化位置**（索引可以从它重建，但不能反过来）。
+ *
+ * 过滤口径与抽取时保持一致（关系两端必须都是收下的实体），否则手改出来的
+ * 孤儿关系会在图上变成连不上的悬空节点。
+ *
+ * 注意：**值为 undefined 的键一律不加**。画像那边的注释记过这个坑 ——
+ * js-yaml 遇到 undefined 会直接抛「unacceptable kind of an object to dump」，
+ * 后果是整篇笔记在落盘那一步全丢。
+ */
+export function normalizePaperGraph(raw: unknown): PaperGraph | undefined {
+  if (!raw || typeof raw !== 'object') return undefined
+  const r = raw as Record<string, unknown>
+
+  const entities: GraphEntity[] = []
+  const seen = new Set<string>()
+  for (const item of Array.isArray(r.entities) ? r.entities : []) {
+    if (!item || typeof item !== 'object') continue
+    const e = item as Record<string, unknown>
+    const name = String(e.name ?? '').trim()
+    if (!name || name.length > 80) continue
+    const key = name.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+
+    const kind = String(e.kind ?? '')
+      .trim()
+      .toLowerCase()
+    const entity: GraphEntity = {
+      name,
+      kind: KIND_SET.has(kind) ? (kind as EntityKind) : 'concept'
+    }
+    const aliases = Array.isArray(e.aliases)
+      ? e.aliases
+          .map((a) => String(a ?? '').trim())
+          .filter((a) => a && a.toLowerCase() !== key)
+          .slice(0, 6)
+      : []
+    if (aliases.length) entity.aliases = aliases
+    entities.push(entity)
+    if (entities.length >= 40) break
+  }
+  if (!entities.length) return undefined
+
+  const relations: GraphRelation[] = []
+  const relSeen = new Set<string>()
+  for (const item of Array.isArray(r.relations) ? r.relations : []) {
+    if (!item || typeof item !== 'object') continue
+    const rel = item as Record<string, unknown>
+    const from = String(rel.from ?? '').trim()
+    const to = String(rel.to ?? '').trim()
+    if (!from || !to || from === to) continue
+    if (!seen.has(from.toLowerCase()) || !seen.has(to.toLowerCase())) continue
+    const type = String(rel.type ?? '')
+      .trim()
+      .toLowerCase()
+    if (!RELATION_SET.has(type)) continue
+    const relKey = `${from}|${type}|${to}`.toLowerCase()
+    if (relSeen.has(relKey)) continue
+    relSeen.add(relKey)
+
+    const edge: GraphRelation = { from, to, type: type as RelationType }
+    const evidence = String(rel.evidence ?? '').trim()
+    if (evidence) edge.evidence = evidence
+    relations.push(edge)
+    if (relations.length >= 80) break
+  }
+
+  const graph: PaperGraph = { entities, relations }
+  if (typeof r.extractedAt === 'string' && r.extractedAt) graph.extractedAt = r.extractedAt
+  return graph
+}
+
+/**
+ * 从 frontmatter 读回来的英语短语做归一化。
+ *
+ * 句式库是跨论文聚合 `phrases` 得来的，所以这个字段同样必须落进 frontmatter ——
+ * 只写索引的话，重建索引就等于把整个句式库清空（和上面图谱是同一类问题）。
+ */
+export function normalizePhrases(raw: unknown): EnglishPhrase[] {
+  if (!Array.isArray(raw)) return []
+  const out: EnglishPhrase[] = []
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue
+    const p = item as Record<string, unknown>
+    const text = String(p.text ?? '').trim()
+    if (!text || text.length > 200) continue
+    const phrase: EnglishPhrase = {
+      category: String(p.category ?? '').trim() || '未分类',
+      text,
+      usage: String(p.usage ?? '').trim()
+    }
+    const example = String(p.example ?? '').trim()
+    if (example) phrase.example = example
+    const from = String(p.from ?? '').trim()
+    if (from) phrase.from = from
+    out.push(phrase)
+    if (out.length >= 60) break
+  }
+  return out
 }

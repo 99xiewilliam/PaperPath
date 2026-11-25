@@ -3,28 +3,29 @@ import type {
   AppSettings,
   ArxivMeta,
   ChatMessage,
+  CollectionCreateInput,
+  CollectionUpdateInput,
   ImportPdfResult,
-  LinkDiscoveryResult,
   LlmSettings,
   PaperBulkUpdate,
+  PaperCollection,
   PaperCreateInput,
   PaperDetail,
   PaperSummary,
   PaperUpdateInput,
   ScanResult,
   StatsOverview,
-  Synthesis,
-  SynthesisScopeInput,
   VaultStatus
 } from './types'
 import type { PhraseEntry } from './phrases'
 import type { LensId } from './lenses'
-import type { GraphData, GraphScope, MultiHopResult } from './graph'
 import type { Highlight } from './highlights'
 import type { ReadingPosition } from './pagination'
 import type { SourceLine } from './autohighlight'
-import type { Quiz } from './quiz'
-import type { SlideDeck } from './slides'
+import type { WritingOverview } from './writing-logic'
+import type { IdeaPatch, ResearchIdea } from './ideas'
+import type { ProblemMap } from './problems'
+import type { ReferenceList } from './references'
 
 /** 划词面板的首轮动作；prompt 本体在 src/main/agents/passage.ts */
 export type PassageMode = 'translate' | 'explain'
@@ -51,6 +52,43 @@ export interface TaskState {
 export interface StreamDelta {
   streamId: string
   delta: string
+  /** 进度说明（「正在查：…」）；有它时 delta 通常为空 */
+  status?: string
+}
+
+/**
+ * 问答里较早的轮次被压缩成的摘要。
+ * upTo = 摘要覆盖了历史里的前多少条消息；之后的消息原样发给模型。
+ */
+export interface ChatMemo {
+  text: string
+  upTo: number
+}
+
+export interface ChatResult extends AiTextResult {
+  /** 这一轮压缩了历史时带回新的摘要，渲染层存进会话，下一轮再带上 */
+  memo?: ChatMemo
+  /** 模型这一轮查阅过的东西（「搜索库：…」「读笔记：…」），给用户看，不回传给模型 */
+  trace?: string[]
+  /** 用户选了、但笔记太长没放进这次上下文的论文标题 */
+  omitted?: string[]
+}
+
+export interface ChatOptions {
+  /** 流式增量通过 onStreamDelta 推送，用它认领；也用于单独取消 */
+  streamId?: string
+  memo?: ChatMemo
+}
+
+/**
+ * 问答的分析范围。专题分析会带上名字和一句话说明，让模型把这几篇
+ * 当成「用户故意归到一起的一组」而不是随便挑的几篇。
+ */
+export interface ChatScope {
+  title?: string
+  description?: string
+  /** 来自专题时带上，工具可以据此读这个专题的问题池 */
+  collectionId?: string
 }
 
 export interface ImportPdfPayload {
@@ -164,28 +202,18 @@ export interface PaperVaultApi {
       sectionKey: string,
       instruction?: string
     ): Promise<AiTextResult>
-    chat(paperIds: string[], messages: ChatMessage[]): Promise<AiTextResult>
-    synthesize(input: SynthesisScopeInput): Promise<AiTaskResult>
     /**
-     * 从**已确认的**论文关系组合研究想法，落成一份跨论文文档（synthesies/）。
-     * 不吃范围参数：范围只由「你确认过哪些关系」决定。
+     * 知识库问答。走交互通道（不排在精读后面）；给了 streamId 就流式推送。
+     * 历史由渲染层维护，main 不存状态：太长时把较早的轮次压成摘要随结果带回。
      */
-    synthesizeIdeas(): Promise<AiTaskResult>
-    /**
-     * 组合分析：对一组自己挑的论文（2-6 篇）整体判断有没有组合创新的空间，
-     * 产出「角度 + 组合论文蓝图」文档。成员之间可以还没有任何关系。
-     * 传 `synthesisId` 表示原地重跑（成员与内容一起换新，不新建文档）。
-     */
-    comboAnalyze(input: {
-      paperIds: string[]
-      title?: string
-      synthesisId?: string
-    }): Promise<AiTaskResult>
-    /**
-     * AI 找关系：在本篇「数据判定过共享技术要素」的候选论文上逐对判断，
-     * 成立的写成 `by: 'ai'` 的提议（要人在面板里确认才算数）。
-     */
-    discoverLinks(paperId: string): Promise<LinkDiscoveryResult>
+    chat(
+      paperIds: string[],
+      messages: ChatMessage[],
+      scope?: ChatScope,
+      options?: ChatOptions
+    ): Promise<ChatResult>
+    /** 停掉 streamId 对应的那次问答 */
+    cancelChat(streamId: string): Promise<boolean>
     /** 只抽取结构化实验画像，比整篇精读便宜得多 */
     buildProfile(id: string): Promise<AiTaskResult>
     /** 批量抽取；传 'missing' 表示补全所有还没有画像的论文 */
@@ -217,19 +245,6 @@ export interface PaperVaultApi {
       message?: string
     }>
     /**
-     * 「考考我」出题：按原文出 5~8 道阅读理解式选择题，解析随题生成。
-     * 判分在渲染层本地完成（gradeQuiz），不为了对答案再调用模型。
-     * 出过的题沉淀进 frontmatter，重测不重新出题。
-     */
-    quiz(paperId: string): Promise<{ ok: boolean; quiz?: Quiz; message?: string }>
-    /**
-     * 生成「演示」：把论文拆成一页页，讲给**没读过它的人**听。
-     *
-     * 一次调用产出整份讲稿，存进 frontmatter 的 slides 键（同 quiz）——
-     * 重新生成才会再调模型，平时翻页是纯本地的。
-     */
-    slides(paperId: string): Promise<{ ok: boolean; deck?: SlideDeck; message?: string }>
-    /**
      * 只重跑指定的分析维度（一个或多个）。
      *
      * 传数组是给「只重试上一次失败的那几个」用的：全量重跑会把本来已经成功的
@@ -260,22 +275,69 @@ export interface PaperVaultApi {
     /** 删一张图（只允许 figures/ 目录内的图片；笔记里的引用会因此裂图） */
     remove(relPath: string): Promise<{ ok: boolean; message?: string }>
   }
+  /**
+   * 专题：用户手动归到一起的论文组。
+   *
+   * 和 papers 平级而不是挂在 papers 下 —— 专题是一等实体（有自己的 Markdown），
+   * 不是论文的附属属性。一篇论文可以同时属于多个专题。
+   */
+  collections: {
+    list(): Promise<PaperCollection[]>
+    get(id: string): Promise<PaperCollection | null>
+    create(input: CollectionCreateInput): Promise<PaperCollection>
+    update(input: CollectionUpdateInput): Promise<PaperCollection>
+    remove(id: string): Promise<boolean>
+    /** 把论文加进专题（已在里面的会跳过，保持原顺序） */
+    addPapers(id: string, paperIds: string[]): Promise<PaperCollection>
+    /** 从专题里移出论文 */
+    removePapers(id: string, paperIds: string[]): Promise<PaperCollection>
+  }
+  /** 开放问题池；scope 是 'all' 或专题 id */
+  problems: {
+    get(scope: string): Promise<ProblemMap | null>
+    /** 范围内共几篇、其中几篇写好了「局限与未来工作」 */
+    status(scope: string): Promise<{ total: number; ready: number }>
+    build(scope: string): Promise<{ ok: boolean; message?: string; map?: ProblemMap }>
+  }
+  /** 读论文风格：知识库里的 skills/读论文风格.md，决定精读 agent 的口吻与导读结构 */
+  skill: {
+    get(): Promise<string>
+    /** 保存并返回落盘后的内容 */
+    save(content: string): Promise<string>
+    /** 恢复默认并返回默认内容 */
+    reset(): Promise<string>
+  }
+  /** 选题本：从开放问题生成的选题 */
+  ideas: {
+    list(): Promise<ResearchIdea[]>
+    /** 针对 scope 问题池里标题为 problemTitle 的问题生成选题，返回新建的那几个 */
+    generate(
+      scope: string,
+      problemTitle: string
+    ): Promise<{ ok: boolean; message?: string; ideas?: ResearchIdea[] }>
+    update(id: string, patch: IdeaPatch): Promise<ResearchIdea>
+    delete(id: string): Promise<boolean>
+  }
+  /** 参考文献对照 */
+  refs: {
+    get(paperId: string): Promise<ReferenceList | null>
+    extract(paperId: string): Promise<{ ok: boolean; message?: string; list?: ReferenceList }>
+    /** 把第 index 条参考文献建成待读论文，返回刷新后的对照表 */
+    addToLibrary(paperId: string, index: number): Promise<ReferenceList>
+  }
   phrases: {
     /** 从全部笔记里聚合出跨论文的可复用句式 */
     list(): Promise<PhraseEntry[]>
   }
-  graph: {
-    /** 拉取用于可视化的子图（已按筛选条件裁剪） */
-    snapshot(scope?: GraphScope): Promise<GraphData>
-    /** 从某个节点出发做多跳检索，返回路径与高亮集合 */
-    multiHop(startId: string, hops?: number, scope?: GraphScope): Promise<MultiHopResult>
-  }
-  synthesis: {
-    list(): Promise<Synthesis[]>
-    get(id: string): Promise<Synthesis | null>
-    save(id: string, title: string, content: string): Promise<Synthesis | null>
-    remove(id: string): Promise<boolean>
-  }
+  writing: {
+    /**
+     * 「写作思路」页的整页快照：单篇逻辑卡 + 已聚出的套路。
+     *
+     * 卡片与套路是同一次计算的两个视图，所以只给一个入口 —— 分成两个频道后
+     * 聚类参数一改就会一边新一遍旧。
+     */
+    overview(): Promise<WritingOverview>
+  },
   stats: {
     overview(): Promise<StatsOverview>
   }

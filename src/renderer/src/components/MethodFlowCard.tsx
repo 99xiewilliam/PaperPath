@@ -31,7 +31,7 @@ export function MethodFlowCard({
 
   return (
     <div className={cn('rounded-xl border border-line bg-bg-raised p-3', className)}>
-      <div className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-ink-low">
+      <div className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-meta text-ink-low">
         <Workflow className="h-3 w-3 shrink-0" />
         <span className="text-ink-mid">方法流程{flow.title ? ` · ${flow.title}` : ''}</span>
         {/*
@@ -79,7 +79,7 @@ export function MethodFlowCard({
                   x={(edge.x1 + edge.x2) / 2}
                   y={(edge.y1 + edge.y2) / 2 + 3}
                   textAnchor="middle"
-                  className="fill-ink-low text-[9.5px]"
+                  className="fill-ink-low text-tiny"
                 >
                   {edge.label}
                 </text>
@@ -88,13 +88,7 @@ export function MethodFlowCard({
           ))}
 
           {layout.nodes.map((node) => (
-            <foreignObject
-              key={node.id}
-              x={node.x}
-              y={node.y}
-              width={node.w}
-              height={node.h}
-            >
+            <foreignObject key={node.id} x={node.x} y={node.y} width={node.w} height={node.h}>
               {/*
                 节点正文按固定高度截断（布局要稳），完整内容悬停时浮出来 ——
                 节点里那两行常常只剩半句，而「这半句到底是什么」正是读图时最常卡住的地方。
@@ -105,24 +99,24 @@ export function MethodFlowCard({
                   <>
                     <div className="font-medium text-ink-high">{node.label}</div>
                     {node.note ? (
-                      <div className="mt-1.5 text-[11.5px] text-ink-mid">{node.note}</div>
+                      <div className="mt-1.5 text-meta text-ink-mid">{node.note}</div>
                     ) : null}
                     {node.source ? (
-                      <div className="mt-1.5 font-mono text-[10.5px] text-brand-mist">
+                      <div className="mt-1.5 font-mono text-caption text-brand-mist">
                         出处：{node.source}
                       </div>
                     ) : null}
                   </>
                 }
               >
-                <div className="line-clamp-2 text-[11.5px] font-medium leading-snug text-ink-high">
+                <div className="line-clamp-2 text-meta font-medium leading-snug text-ink-high">
                   {node.label}
                 </div>
                 {node.note ? (
-                  <div className="mt-0.5 line-clamp-1 text-[10px] text-ink-low">{node.note}</div>
+                  <div className="mt-0.5 line-clamp-1 text-caption text-ink-low">{node.note}</div>
                 ) : null}
                 {node.source ? (
-                  <div className="mt-0.5 font-mono text-[9.5px] text-brand-mist">{node.source}</div>
+                  <div className="mt-0.5 font-mono text-tiny text-brand-mist">{node.source}</div>
                 ) : null}
               </HoverTip>
             </foreignObject>

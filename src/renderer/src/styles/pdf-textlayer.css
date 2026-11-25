@@ -87,7 +87,7 @@
 .pdf-float-card {
   background: rgba(31, 19, 30, 0.985);
   /* 显式给个前景色，不依赖从 body 继承 —— 卡片压在白纸上，继承链容易出意外 */
-  color: #ece8df;
+  color: #eeeae2;
   backdrop-filter: blur(14px);
   -webkit-backdrop-filter: blur(14px);
   border: 1px solid rgba(255, 255, 255, 0.14);
@@ -110,6 +110,5 @@
 
 /* 深色模式下选区的品牌色本身没问题，但要更实一点才在暗底上看清 */
 .pdf-viewer-page.is-dark .textLayer ::selection {
-  background: rgba(116, 172, 143, 0.50);
+  background: rgba(116, 172, 143, 0.5);
 }
-

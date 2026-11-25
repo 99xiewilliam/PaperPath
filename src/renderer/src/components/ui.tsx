@@ -25,18 +25,18 @@ const VARIANTS: Record<ButtonVariant, string> = {
    * 松绿底配象牙字：深绿上放纸色字（约 5.5:1），是紫底书房里
    * 「墨绿书封上烫象牙字」的样子，也是全界面唯一的实色动作块。
    */
-  primary:
-    'bg-gradient-to-b from-[#41856A] to-[#2F644F] text-[#EDEAE0] hover:from-[#4A9175] hover:to-[#38735A] disabled:opacity-40 shadow-[inset_0_1px_0_rgba(214,242,224,0.22),0_1px_2px_rgba(0,0,0,0.45)]',
-  subtle: 'bg-white/[0.07] text-ink-high hover:bg-white/[0.11] border border-line shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]',
+  primary: 'btn-primary disabled:opacity-40',
+  subtle:
+    'bg-white/[0.07] text-ink-high hover:bg-white/[0.11] border border-line shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]',
   ghost: 'text-ink-mid hover:text-ink-high hover:bg-white/[0.06]',
   danger: 'bg-danger/15 text-danger border border-danger/30 hover:bg-danger/25',
   outline: 'border border-line text-ink-mid hover:text-ink-high hover:border-strong'
 }
 
 const SIZES: Record<ButtonSize, string> = {
-  xs: 'h-6 px-2 text-[11px] gap-1 rounded-md',
-  sm: 'h-8 px-2.5 text-[12px] gap-1.5 rounded-lg',
-  md: 'h-9 px-3.5 text-[13px] gap-2 rounded-lg'
+  xs: 'h-6 px-2 text-meta gap-1 rounded-md',
+  sm: 'h-8 px-2.5 text-ui gap-1.5 rounded-lg',
+  md: 'h-9 px-3.5 text-body gap-2 rounded-lg'
 }
 
 export function Button({
@@ -73,7 +73,9 @@ export function IconButton({
   children,
   active,
   ...rest
-}: React.ButtonHTMLAttributes<HTMLButtonElement> & { active?: boolean }): JSX.Element {
+}: React.ButtonHTMLAttributes<HTMLButtonElement> & {
+  active?: boolean
+}): JSX.Element {
   return (
     <button
       {...rest}
@@ -178,7 +180,7 @@ export function Modal({
      * 「精读时整个窗口一直在抽搐」，CPU 还看不出异常（不是 JS 在跑，是重绘）。
      * 用不透明的压暗代替模糊，观感几乎一致，但重绘成本从「每帧全窗」降到「零」。
      */
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-[#100712]/80 p-8">
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-bg-sunken/80 p-8">
       <div
         role="dialog"
         aria-modal="true"
@@ -191,7 +193,7 @@ export function Modal({
         <header className="flex items-start justify-between gap-4 border-b border-line px-5 py-4">
           <div className="min-w-0">
             <h3 className="text-[15px] font-semibold text-ink-high">{title}</h3>
-            {subtitle ? <p className="mt-1 text-[12px] text-ink-mid">{subtitle}</p> : null}
+            {subtitle ? <p className="mt-1 text-ui text-ink-mid">{subtitle}</p> : null}
           </div>
           <IconButton title="关闭" onClick={onClose}>
             <X className="h-4 w-4" />
@@ -263,17 +265,14 @@ export function useConfirm(): {
           <Button variant="ghost" onClick={() => settle(false)}>
             取消
           </Button>
-          <Button
-            variant={request?.danger ? 'danger' : 'primary'}
-            onClick={() => settle(true)}
-          >
+          <Button variant={request?.danger ? 'danger' : 'primary'} onClick={() => settle(true)}>
             {request?.confirmLabel ?? '确定'}
           </Button>
         </>
       }
     >
       {request?.description ? (
-        <p className="text-[12.5px] leading-relaxed text-ink-mid">{request.description}</p>
+        <p className="text-ui leading-relaxed text-ink-mid">{request.description}</p>
       ) : null}
     </Modal>
   )
@@ -297,8 +296,8 @@ export function Field({
   return (
     <label className={cn('block', className)}>
       <span className="mb-1.5 flex items-baseline justify-between gap-2">
-        <span className="text-[12px] font-medium text-ink-mid">{label}</span>
-        {hint ? <span className="text-[11px] text-ink-low">{hint}</span> : null}
+        <span className="text-ui font-medium text-ink-mid">{label}</span>
+        {hint ? <span className="text-meta text-ink-low">{hint}</span> : null}
       </span>
       {children}
     </label>
@@ -307,7 +306,7 @@ export function Field({
 
 export function Spinner({ label }: { label?: string }): JSX.Element {
   return (
-    <div className="flex items-center gap-2 text-[12px] text-ink-mid">
+    <div className="flex items-center gap-2 text-ui text-ink-mid">
       <Loader2 className="h-3.5 w-3.5 animate-spin text-brand-soft" />
       {label}
     </div>
@@ -330,7 +329,7 @@ export function EmptyState({
       {icon ? <div className="text-ink-low">{icon}</div> : null}
       <div className="text-[14px] font-medium text-ink-high">{title}</div>
       {description ? (
-        <div className="max-w-md text-[12.5px] leading-relaxed text-ink-mid">{description}</div>
+        <div className="max-w-md text-ui leading-relaxed text-ink-mid">{description}</div>
       ) : null}
       {action}
     </div>
@@ -345,29 +344,33 @@ export function Toaster(): JSX.Element {
 
   return createPortal(
     <div className="pointer-events-none fixed bottom-5 right-5 z-[100] flex w-[360px] flex-col gap-2">
-      {toasts.map((t) => (
-        <div
-          key={t.id}
-          onClick={() => dismiss(t.id)}
-          className={cn(
-            'animate-slide-up pointer-events-auto flex cursor-pointer items-start gap-2.5 rounded-lg border px-3.5 py-3 text-[12.5px] shadow-xl backdrop-blur',
-            t.kind === 'error'
-              ? 'border-danger/30 bg-danger/10 text-danger'
-              : t.kind === 'success'
-                ? 'border-ok/30 bg-ok/10 text-ok'
-                : 'border-line bg-bg-overlay text-ink-high'
-          )}
-        >
-          {t.kind === 'error' ? (
-            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-          ) : t.kind === 'success' ? (
-            <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" />
-          ) : (
-            <Info className="mt-0.5 h-4 w-4 shrink-0" />
-          )}
-          <span className="leading-relaxed">{t.text}</span>
-        </div>
-      ))}
+      {toasts.map((t) => {
+        /*
+         * 实底 + 左侧色条：半透明底会让下面的正文透上来和提示文字叠在一起；
+         * 颜色只给图标和色条，正文保持象牙色，整段红字读起来很累。
+         */
+        const tone =
+          t.kind === 'error' ? 'text-danger' : t.kind === 'success' ? 'text-ok' : 'text-info'
+        const bar = t.kind === 'error' ? 'bg-danger' : t.kind === 'success' ? 'bg-ok' : 'bg-info'
+        return (
+          <div
+            key={t.id}
+            onClick={() => dismiss(t.id)}
+            className="animate-slide-up pointer-events-auto relative flex cursor-pointer items-start gap-2.5 overflow-hidden rounded-lg border border-strong bg-bg-overlay py-2.5 pl-4 pr-2.5 text-ui text-ink-high shadow-[0_8px_24px_rgba(0,0,0,0.45)]"
+          >
+            <span className={cn('absolute inset-y-0 left-0 w-[3px]', bar)} />
+            {t.kind === 'error' ? (
+              <AlertTriangle className={cn('mt-[3px] h-4 w-4 shrink-0', tone)} />
+            ) : t.kind === 'success' ? (
+              <CheckCircle2 className={cn('mt-[3px] h-4 w-4 shrink-0', tone)} />
+            ) : (
+              <Info className={cn('mt-[3px] h-4 w-4 shrink-0', tone)} />
+            )}
+            <span className="min-w-0 flex-1 leading-relaxed">{t.text}</span>
+            <X className="mt-[3px] h-3.5 w-3.5 shrink-0 text-ink-low" aria-hidden />
+          </div>
+        )
+      })}
     </div>,
     document.body
   )
@@ -390,7 +393,7 @@ export function BusyOverlay(): JSX.Element | null {
        * 在逐帧变化，带 backdrop-filter 会让合成器每帧重新过滤一次（见上面 Modal
        * 的注释）。`bg-bg-overlay/95` 已经接近实色，去掉模糊肉眼几乎看不出差别。
        */}
-      <div className="animate-fade-in pointer-events-auto mt-3 flex items-center gap-2.5 rounded-full border border-line bg-bg-overlay/95 px-4 py-2 text-[12.5px] text-ink-high shadow-xl">
+      <div className="animate-fade-in pointer-events-auto mt-3 flex items-center gap-2.5 rounded-full border border-line bg-bg-overlay/95 px-4 py-2 text-ui text-ink-high shadow-xl">
         <Loader2 className="h-3.5 w-3.5 animate-spin text-brand-soft" />
         <span className="max-w-[52vw] truncate">{busy.label}</span>
         {activeTaskId ? (
@@ -400,7 +403,7 @@ export function BusyOverlay(): JSX.Element | null {
               void cancelTask().finally(() => setCancelling(false))
             }}
             disabled={cancelling}
-            className="ml-1 flex items-center gap-1 rounded-full border border-line px-2 py-0.5 text-[11px] text-ink-mid transition hover:border-strong hover:text-ink-high disabled:opacity-50"
+            className="ml-1 flex items-center gap-1 rounded-full border border-line px-2 py-0.5 text-meta text-ink-mid transition hover:border-strong hover:text-ink-high disabled:opacity-50"
           >
             <X className="h-3 w-3" />
             取消
@@ -479,7 +482,7 @@ function TipCard({ rect, children }: { rect: DOMRect; children: React.ReactNode 
           ? { bottom: window.innerHeight - rect.top + TIP_GAP }
           : { top: rect.bottom + TIP_GAP })
       }}
-      className="pointer-events-none fixed z-[95] overflow-y-auto rounded-xl border border-line bg-bg-overlay px-3.5 py-2.5 text-[12px] leading-relaxed text-ink-high shadow-2xl"
+      className="pointer-events-none fixed z-[95] overflow-y-auto rounded-xl border border-line bg-bg-overlay px-3.5 py-2.5 text-ui leading-relaxed text-ink-high shadow-2xl"
     >
       {children}
     </div>

@@ -28,6 +28,36 @@ import * as vault from '../src/main/vault'
 let pass = 0
 let fail = 0
 
+/**
+ * 知识图谱功能已下线，字段在类型上是 `unknown`（见 shared/types.ts）。
+ * 这里按它当年的形状做断言，守的不是功能，而是**老库里的数据不被抹掉**。
+ */
+interface LegacyGraph {
+  entities: { name?: string; aliases?: string[] }[]
+  relations: { type?: string; evidence?: string }[]
+  extractedAt?: string
+}
+const graphOf = (m?: { graph?: unknown } | null): LegacyGraph | undefined =>
+  m?.graph as LegacyGraph | undefined
+
+/** 论文关系（links）同样已下线，断言只守「原样往返、不被普通保存抹掉」 */
+interface LegacyLink {
+  to?: string
+  type?: string
+  note?: string
+  by?: string
+  evidence?: string
+}
+const linksOf = (m?: { links?: unknown } | null): LegacyLink[] | undefined =>
+  m?.links as LegacyLink[] | undefined
+
+/** 复习安排（learningReview）同样已下线，只保留「原样往返」这条断言 */
+const reviewOf = (id: string): { intervalDays?: number } | undefined => {
+  const row = db.getPaperRow(id)
+  return (row ? db.paperMetaFromRow(row).learningReview : undefined) as
+    { intervalDays?: number } | undefined
+}
+
 function check(name: string, ok: boolean, detail = ''): void {
   if (ok) {
     pass++
@@ -168,7 +198,7 @@ async function main(): Promise<void> {
   check(
     '迁移补上了 highlights 列（缺列会让保存删掉高亮）',
     !!legacyRow && 'highlights' in legacyRow,
-    legacyRow ? Object.keys(legacyRow).includes('highlights') ? '存在' : '不存在' : '行不存在'
+    legacyRow ? (Object.keys(legacyRow).includes('highlights') ? '存在' : '不存在') : '行不存在'
   )
 
   /*
@@ -185,7 +215,30 @@ async function main(): Promise<void> {
   db.setPaperRun('A', runRecord)
   check('迁移补上了 last_run 列（能存能读运行记录）', db.getPaperRun('A')?.message === '没跑起来')
   check('没有运行记录的论文返回 null', db.getPaperRun('B') === null)
-  check('旧论文迁移后没有凭空产生 learningReview', db.getPaperSummary('B')?.learningReview === undefined)
+
+  // 只因已下线维度（graph）失败的记录：读回来时剔掉它，状态转成全部成功
+  db.setPaperRun('A', {
+    finishedAt: new Date().toISOString(),
+    status: 'partial',
+    message: '1 个维度失败',
+    lenses: [
+      { id: 'overview', label: '速览', ok: true, message: '' },
+      {
+        id: 'graph' as LensRunRecord['lenses'][number]['id'],
+        label: '知识图谱',
+        ok: false,
+        message: '超时'
+      }
+    ]
+  })
+  const pruned = db.getPaperRun('A')
+  check(
+    '下线维度从运行记录里剔除',
+    !!pruned && pruned.lenses.every((l) => (l.id as string) !== 'graph'),
+    pruned?.lenses.map((l) => l.id).join(',')
+  )
+  check('只剩成功维度时状态转成 ok', pruned?.status === 'ok', pruned?.status)
+  check('旧论文迁移后没有凭空产生 learningReview', reviewOf('B') === undefined)
 
   const stats = db.computeStats()
   check('论文总数没丢', stats.total === total, `total=${stats.total}`)
@@ -213,7 +266,7 @@ async function main(): Promise<void> {
   check('老库升级后补上了 links 列（迁移路径）', row != null && row.links !== undefined)
   check(
     '老库里没有关系，读出来是空数组而不是崩掉',
-    (row ? (db.paperMetaFromRow(row).links?.length ?? -1) : -1) === 0
+    (row ? (linksOf(db.paperMetaFromRow(row))?.length ?? -1) : -1) === 0
   )
   check('tldr 等派生字段仍在索引里', String(row?.tldr ?? '').includes('老库里的论文 A'))
 
@@ -268,13 +321,16 @@ async function main(): Promise<void> {
   await db.openDatabase(dir)
   const stats3 = db.computeStats()
   check('重启后总数正确', stats3.total === total, `total=${stats3.total}`)
-  check('旧库升级后 learningReview 仍能保存并恢复', db.getPaperSummary('B')?.learningReview?.intervalDays === 3)
+  check('旧库升级后 learningReview 仍能保存并恢复', reviewOf('B')?.intervalDays === 3)
   check(
     '重启后指标不回退、不重复累加',
     stats3.withWritingNotes === 2 && stats3.withExperimentNotes === 2,
     `writing=${stats3.withWritingNotes} experiment=${stats3.withExperimentNotes}`
   )
-  check('重启后仍能从 Markdown 读到章节', Object.keys(vault.readPaperSections(dir, 'A')).length >= 4)
+  check(
+    '重启后仍能从 Markdown 读到章节',
+    Object.keys(vault.readPaperSections(dir, 'A')).length >= 4
+  )
 
   console.log('')
   console.log('── 5. 索引体积（本轮改造的核心收益） ─────')
@@ -346,7 +402,8 @@ async function main(): Promise<void> {
   check('备注保留', hlRead?.meta.highlights?.[0]?.note === 'dataset 规模')
   check(
     '正文里的中文没被转义成乱码',
-    hlRead?.meta.highlights?.[0]?.note === 'dataset 规模' && hlRead.meta.highlights[0].text.includes('CultureVerse')
+    hlRead?.meta.highlights?.[0]?.note === 'dataset 规模' &&
+      hlRead.meta.highlights[0].text.includes('CultureVerse')
   )
 
   // 没有高亮的论文不该被塞一个空键，否则每篇 frontmatter 都多一行噪音
@@ -381,18 +438,95 @@ async function main(): Promise<void> {
   check('不带 highlights 保存后，文件里的高亮仍在', /^highlights:/m.test(hlAfter))
   check('高亮内容没丢', hlAfter.includes('h9'))
 
+  /*
+   * 图谱与英语短语的落盘往返。
+   *
+   * 这两样从前**只写索引、不写 frontmatter**，而索引是能从笔记重建的 ——
+   * 于是重建一次（或换台机器、删掉 .papervault）图谱就被抹掉，图谱页随即显示
+   * 「还没有可以建图的数据」，而句式库一起清空。它们和高亮是同一类数据
+   * （AI 抽出来、没法从正文重新长出来），就该落在同一个地方。
+   */
+  const gMeta = vault.blankPaperMeta({ id: 'GRAPH', title: 'Graph Roundtrip' })
+  gMeta.graph = {
+    entities: [
+      { name: 'LLaVA-1.5', kind: 'model', aliases: ['LLaVA'] },
+      { name: 'DROID', kind: 'dataset' }
+    ],
+    relations: [{ from: 'LLaVA-1.5', to: 'DROID', type: 'trained-on', evidence: 'Sec 3.2' }],
+    extractedAt: '2026-09-30T00:00:00.000Z'
+  }
+  gMeta.phrases = [{ category: '报告结果', text: 'as shown in', usage: '引出结果' }]
+
+  const gWritten = vault.writePaperFile(dir, gMeta, { 一句话总结: '- g' })
+  const gRaw = readFileSync(gWritten.absPath, 'utf-8')
+  check('frontmatter 里写出了 graph', /^graph:/m.test(gRaw))
+  check('frontmatter 里写出了 phrases', /^phrases:/m.test(gRaw))
+
+  const gBack = vault.readPaperFile(gWritten.absPath, dir)
+  check(
+    '回读：实体数一致',
+    graphOf(gBack?.meta)?.entities.length === 2,
+    String(graphOf(gBack?.meta)?.entities.length)
+  )
+  check('回读：关系数一致', graphOf(gBack?.meta)?.relations.length === 1)
+  check('回读：关系类型保留', graphOf(gBack?.meta)?.relations[0]?.type === 'trained-on')
+  check('回读：关系证据保留', graphOf(gBack?.meta)?.relations[0]?.evidence === 'Sec 3.2')
+  check('回读：别名保留', graphOf(gBack?.meta)?.entities[0]?.aliases?.[0] === 'LLaVA')
+  check('回读：抽取时间保留', graphOf(gBack?.meta)?.extractedAt === '2026-09-30T00:00:00.000Z')
+  check('回读：句式保留', gBack?.meta.phrases?.[0]?.text === 'as shown in')
+
+  /*
+   * 最要紧的一条：普通保存（meta 来自索引行、不带 graph）不能把图谱抹掉。
+   * 这和高亮被删光是同一类事故 —— 而且图谱比高亮更不可恢复。
+   */
+  vault.writePaperFile(dir, vault.blankPaperMeta({ id: 'GRAPH', title: 'Graph Roundtrip' }), {
+    一句话总结: '- g2'
+  })
+  const gAfter = readFileSync(gWritten.absPath, 'utf-8')
+  check('meta 没带 graph 时沿用磁盘上的', /^graph:/m.test(gAfter))
+  check('meta 没带 phrases 时沿用磁盘上的', /^phrases:/m.test(gAfter))
+  check('沿用之后实体没丢', gAfter.includes('DROID') && gAfter.includes('LLaVA-1.5'))
+
+  // 反过来：显式传空仍然要生效（「保留」不能变成「删不掉」）
+  const gCleared = vault.blankPaperMeta({ id: 'GRAPH', title: 'Graph Roundtrip' })
+  gCleared.graph = { entities: [], relations: [] }
+  gCleared.phrases = []
+  vault.writePaperFile(dir, gCleared, { 一句话总结: '- g3' })
+  const gClearedRaw = readFileSync(gWritten.absPath, 'utf-8')
+  check('显式清空时不再写 graph 键', !/^graph:/m.test(gClearedRaw))
+  check('显式清空时不再写 phrases 键', !/^phrases:/m.test(gClearedRaw))
+
+  /*
+   * 空壳图谱：老版本往索引里写过 `{}` 这种结构（**连 entities 键都没有**），
+   * 读出来不归一化的话，保存笔记时会在 `graph.entities.length` 上崩掉整篇 ——
+   * 实测崩过一次，位置是更新论文那条链路（smoke:ipc 先发现的）。
+   */
+  const hollow = vault.blankPaperMeta({ id: 'HOLLOW', title: 'Hollow Graph' })
+  hollow.graph = {} as never
+  const hollowWritten = vault.writePaperFile(dir, hollow, { 一句话总结: '- h' })
+  check('空壳图谱不写键也不崩', !/^graph:/m.test(readFileSync(hollowWritten.absPath, 'utf-8')))
+  check(
+    '空壳图谱读回来是 undefined（而不是空对象）',
+    vault.readPaperFile(hollowWritten.absPath, dir)?.meta.graph === undefined
+  )
+
   /* ---------------- 8. 「没传」≠「清空」 ---------------- */
   console.log('')
   console.log('── 8. 索引独有字段的保留语义 ────────────')
 
   /*
-   * graph / phrases / highlights 有个共同点：**它们不在 Markdown 的 frontmatter 里**，
-   * 所以 rescanVault 那种「按文件重新解析后写回索引」的调用，meta 里根本不含它们。
+   * highlights / graph / phrases 有个共同点：**磁盘上（frontmatter）才是它们的家**，
+   * 索引里那一列只是副本。而 rescanVault 那种「按文件重新解析后写回索引」的调用，
+   * meta 里可能压根不含它们 —— 于是这里的保留语义就是最后一道保险。
    *
-   * 以前 upsertPaper 写的是 `meta.phrases ?? []` —— 把「没传」当成了「清空」，
-   * 于是 rescan 一跑就把全库的图谱和句式库清零（在设置里改一次自定义分类
-   * 就会触发全库重扫）。高亮更糟：索引根本没有这一列，每次保存都会把
-   * Markdown 里的 highlights 键删掉。
+   * 以前 upsertPaper 写的是 `meta.phrases ?? []`，把「没传」当成了「清空」，
+   * 于是 rescan 一跑就把全库的句式库清零（在设置里改一次自定义分类
+   * 就会触发全库重扫）。
+   *
+   * 而 graph / phrases 从前更根本的问题是：**它们只存在索引里**，而索引是能重建的 ——
+   * 重建一次（或换台机器、删掉 .papervault）图谱就被抹掉，图谱页随即变成
+   * 「还没有可以建图的数据」。现在它们和高亮一样落进 frontmatter，
+   * 索引退回它本来的角色：一份可以随时丢弃的副本。
    */
   const keepMeta = vault.blankPaperMeta({ id: 'KEEP', title: 'Keep Fields' })
   keepMeta.phrases = [{ category: '报告结果', text: 'as shown in', usage: '引出结果' }]
@@ -405,7 +539,7 @@ async function main(): Promise<void> {
   const keepRow = db.getPaperRow('KEEP')
   const before = keepRow ? db.paperMetaFromRow(keepRow) : null
   check('写入后索引里有句式', (before?.phrases?.length ?? 0) === 1)
-  check('写入后索引里有图谱', before?.graph?.entities?.length === 1)
+  check('写入后索引里有图谱', graphOf(before)?.entities?.length === 1)
   check(
     '写入后索引里有高亮',
     (before?.highlights?.length ?? 0) === 1,
@@ -428,8 +562,8 @@ async function main(): Promise<void> {
   )
   check(
     '重扫后图谱没被清空',
-    after?.graph?.entities?.length === 1,
-    `entities=${after?.graph?.entities?.length ?? 0}`
+    graphOf(after)?.entities?.length === 1,
+    `entities=${graphOf(after)?.entities?.length ?? 0}`
   )
   check(
     '重扫后高亮没被清空',
@@ -448,8 +582,8 @@ async function main(): Promise<void> {
   check('显式传空数组仍然清空高亮', (afterClear?.highlights?.length ?? 0) === 0)
   check(
     '没传的图谱依旧保留（各列互不影响）',
-    afterClear?.graph?.entities?.length === 1,
-    `entities=${afterClear?.graph?.entities?.length ?? 0}`
+    graphOf(afterClear)?.entities?.length === 1,
+    `entities=${graphOf(afterClear)?.entities?.length ?? 0}`
   )
 
   /* ---------------- 9. 论文关系（links） ---------------- */
@@ -472,19 +606,22 @@ async function main(): Promise<void> {
   const linkRead = vault.readPaperFile(linkWritten.absPath, fresh)
   check(
     '关系条数往返一致',
-    linkRead?.meta.links?.length === 2,
-    `links=${linkRead?.meta.links?.length ?? 0}`
+    linksOf(linkRead?.meta)?.length === 2,
+    `links=${linksOf(linkRead?.meta)?.length ?? 0}`
   )
   check(
     '类型 / 备注 / 来源都保留',
-    linkRead?.meta.links?.some(
+    linksOf(linkRead?.meta)?.some(
       (l) =>
-        l.to === 'OTHER' && l.type === 'builds-on' && l.note === '改进了它的检索环节' && l.by === 'user'
+        l.to === 'OTHER' &&
+        l.type === 'builds-on' &&
+        l.note === '改进了它的检索环节' &&
+        l.by === 'user'
     ) === true
   )
   check(
     'AI 提议的 evidence 保留（那是它唯一可追溯的依据）',
-    linkRead?.meta.links?.some(
+    linksOf(linkRead?.meta)?.some(
       (l) => l.to === 'AI-ONE' && l.by === 'ai' && l.evidence === '§3.2 说可以搬过去'
     ) === true
   )
@@ -498,11 +635,15 @@ async function main(): Promise<void> {
   check('关系内容没丢', linkRaw.includes('OTHER'))
 
   // 索引镜像：构图靠它，否则每画一次图都要读全库 Markdown
-  db.upsertPaper({ meta: linkRead!.meta, sections: { 一句话总结: '- l' }, relPath: 'papers/LINK.md' })
+  db.upsertPaper({
+    meta: linkRead!.meta,
+    sections: { 一句话总结: '- l' },
+    relPath: 'papers/LINK.md'
+  })
   const linkRow = db.getPaperRow('LINK')
   check(
     '索引里也有关系（构图靠它）',
-    (linkRow ? (db.paperMetaFromRow(linkRow).links?.length ?? 0) : 0) === 2
+    (linkRow ? (linksOf(db.paperMetaFromRow(linkRow))?.length ?? 0) : 0) === 2
   )
 
   db.upsertPaper({
@@ -513,7 +654,7 @@ async function main(): Promise<void> {
   const keptRow = db.getPaperRow('LINK')
   check(
     '不带 links 的写入不会清空索引里的关系（「没传」≠「清空」）',
-    (keptRow ? (db.paperMetaFromRow(keptRow).links?.length ?? 0) : 0) === 2
+    (keptRow ? (linksOf(db.paperMetaFromRow(keptRow))?.length ?? 0) : 0) === 2
   )
 
   const clearedLinks = vault.blankPaperMeta({ id: 'LINK', title: 'Linked Paper' })
@@ -522,49 +663,12 @@ async function main(): Promise<void> {
   const clearedLinkRow = db.getPaperRow('LINK')
   check(
     '显式传空数组才是真清空（「保留」不能变成「删不掉」）',
-    (clearedLinkRow ? (db.paperMetaFromRow(clearedLinkRow).links?.length ?? -1) : -1) === 0
+    (clearedLinkRow ? (linksOf(db.paperMetaFromRow(clearedLinkRow))?.length ?? -1) : -1) === 0
   )
   const clearedFile = vault.writePaperFile(fresh, clearedLinks, { 一句话总结: '- l' })
   check(
     '清空后 frontmatter 里的 links 键被删掉（不是留一个空数组）',
     !/^links:/m.test(readFileSync(clearedFile.absPath, 'utf-8'))
-  )
-
-  /* ---------------- 归纳 / 组合文档：原地重跑的语义 ---------------- */
-  console.log('')
-  console.log('── 跨论文文档：重跑不该新建、也不该改创建时间 ──')
-
-  const comboScope = { type: 'combo' as const, value: '组合分析', paperIds: ['p-a', 'p-b'] }
-  db.upsertSynthesis({
-    id: 'combo-1',
-    title: '组合分析 · 2 篇',
-    scope: comboScope,
-    content: '第一版',
-    relPath: 'syntheses/combo-1.md',
-    paperCount: 2,
-    createdAt: '2026-01-01T00:00:00.000Z',
-    updatedAt: '2026-01-01T00:00:00.000Z'
-  })
-  db.upsertSynthesis({
-    id: 'combo-1',
-    title: '组合分析 · 3 篇',
-    scope: { ...comboScope, paperIds: ['p-a', 'p-b', 'p-c'] },
-    content: '第二版',
-    relPath: 'syntheses/combo-1.md',
-    paperCount: 3,
-    // 刻意不传 createdAt：沿用库里原值（重跑不该把「创建于」推到今天）
-    updatedAt: '2026-02-02T00:00:00.000Z'
-  })
-  const rerun = db.getSynthesis('combo-1')
-  check('重跑后还是同一份文档（id 不变、不新建）', db.synthesisCount() === 1)
-  check('重跑保留创建时间', rerun?.createdAt.startsWith('2026-01-01') === true, rerun?.createdAt)
-  check(
-    '重跑更新内容与更新时间',
-    rerun?.content === '第二版' && rerun.updatedAt.startsWith('2026-02-02') === true
-  )
-  check(
-    '成员（scope.paperIds）原样读回 —— 重跑正是靠它知道该拿哪几篇',
-    rerun?.scope.paperIds?.join('|') === 'p-a|p-b|p-c' && rerun.paperCount === 3
   )
 
   db.closeDatabase()

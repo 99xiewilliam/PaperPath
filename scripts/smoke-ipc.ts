@@ -18,7 +18,7 @@
  *   7. PDF 预览窗口 + 路径越界防护（frontmatter 里的 `pdf` 不可信）
  *   8. 未配置 Key 时 AI 任务返回业务错误而不是抛异常，且进度广播到了渲染层
  *   9. API Key 落盘是密文
- *  10. 句式库 / 图谱返回形状
+ *  10. 句式库返回形状
  *  11. 重新扫描：幂等，且能发现外部对 Markdown 的改动
  *  12. 删除：Markdown / PDF 副本 / 抽取文本一起清理，且绝不碰知识库外的文件
  *  13. 批量操作：增量语义（加标签不冲掉原有分类）+ 逐个清理
@@ -26,6 +26,10 @@
  *  15. 原文图表：保存 / 读取 / 列举 / 删除 / 越权防护
  *  16. 方法流程图：能写进 frontmatter，也不会被普通保存抹掉
  *  17. 阅读位置存索引 DB 不碰笔记文件；AI 高亮的 ai 标记挺过读改写
+ *  18. 思维导图与已下线功能的历史字段
+ *  19. 专题：Markdown 落盘 / 加入移出 / 删论文时剪掉成员 / 重建索引能从文件恢复
+ *  20. 开放问题池（范围校验 / 落盘回读）、选题本（生成前校验 / 状态与备注 / 删除）
+ *      与参考文献对照（在库匹配 / 加入待读）
  *
  * 用法：npm run smoke:ipc
  */
@@ -39,15 +43,18 @@ import {
   rmSync,
   writeFileSync
 } from 'fs'
+import { createServer } from 'http'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import type { GraphData } from '@shared/graph'
 import type { Highlight } from '@shared/highlights'
+import type { ResearchIdea } from '@shared/ideas'
+import type { OpenProblem } from '@shared/problems'
 import type { PhraseEntry } from '@shared/phrases'
 import type {
   AiTaskResult,
   AppSettings,
   ImportPdfResult,
+  PaperCollection,
   PaperDetail,
   PaperSummary,
   ScanResult,
@@ -122,25 +129,35 @@ const EXPECTED_CHANNELS = [
   'ai:summarize',
   'ai:rewriteSection',
   'ai:chat',
-  'ai:synthesize',
-  'ai:synthesizeIdeas',
-  'ai:comboAnalyze',
-  'ai:discoverLinks',
+  'ai:cancelChat',
   'ai:runLens',
   'ai:buildProfile',
   'ai:passage',
   'ai:autoHighlight',
-  'ai:quiz',
   'ai:buildProfiles',
+  'collection:list',
+  'collection:get',
+  'collection:create',
+  'collection:update',
+  'collection:delete',
+  'collection:addPapers',
+  'collection:removePapers',
+  'problems:get',
+  'problems:status',
+  'problems:build',
+  'refs:get',
+  'refs:extract',
+  'refs:addToLibrary',
+  'skill:get',
+  'skill:save',
+  'skill:reset',
+  'ideas:list',
+  'ideas:generate',
+  'ideas:update',
+  'ideas:delete',
   'task:cancel',
   'task:state',
-  'graph:snapshot',
-  'graph:multiHop',
   'phrases:list',
-  'synthesis:list',
-  'synthesis:get',
-  'synthesis:save',
-  'synthesis:delete',
   'figures:save',
   'figures:read',
   'figures:list',
@@ -198,11 +215,33 @@ async function main(): Promise<void> {
     '目录结构已建立',
     existsSync(join(vaultDir, 'papers')) &&
       existsSync(join(vaultDir, 'syntheses')) &&
+      existsSync(join(vaultDir, 'collections')) &&
       existsSync(join(vaultDir, '.papervault', 'pdfs')) &&
       existsSync(join(vaultDir, '.papervault', 'texts'))
   )
   check('生成了知识库 README', existsSync(join(vaultDir, 'README.md')))
   check('初始论文数为 0', status.paperCount === 0, `paperCount=${status.paperCount}`)
+
+  const skillPath = join(vaultDir, 'skills', '读论文风格.md')
+  check('生成了默认的读论文风格 skill', existsSync(skillPath))
+  const skillDefault = await invoke<string>('skill:get')
+  check(
+    'skill:get 读到默认内容',
+    skillDefault.includes('## 口吻') && skillDefault.includes('## 导读结构')
+  )
+  const skillSaved = await invoke<string>('skill:save', '## 口吻\n\n像朋友聊天一样讲。\n')
+  check(
+    'skill:save 写进文件并返回落盘内容',
+    skillSaved.includes('像朋友聊天') && readFileSync(skillPath, 'utf-8').includes('像朋友聊天')
+  )
+  const skillReset = await invoke<string>('skill:reset')
+  check(
+    'skill:reset 恢复默认',
+    skillReset === skillDefault && readFileSync(skillPath, 'utf-8') === skillDefault
+  )
+  rmSync(skillPath)
+  await invoke('vault:open', vaultDir)
+  check('删掉 skill 文件后重开知识库会重新生成默认', existsSync(skillPath))
 
   /* ---------------------------------------------------------------- */
   section('3. 新建 / 更新 / 详情')
@@ -272,8 +311,14 @@ async function main(): Promise<void> {
   section('5. 统计')
   const stats = await invoke<StatsOverview>('stats:overview')
   check('总数正确', stats.total === 1, `total=${stats.total}`)
-  check('分类分布被统计到', stats.byCategory.some((c) => c.id === 'benchmark'))
-  check('标签被统计到', stats.byTag.some((t) => t.tag === '检索'))
+  check(
+    '分类分布被统计到',
+    stats.byCategory.some((c) => c.id === 'benchmark')
+  )
+  check(
+    '标签被统计到',
+    stats.byTag.some((t) => t.tag === '检索')
+  )
   check('实验方法论完成度被算上', stats.withExperimentNotes === 1)
   check('积累字数大于 0', stats.totalChars > 0, `chars=${stats.totalChars}`)
 
@@ -428,23 +473,9 @@ async function main(): Promise<void> {
   )
 
   /* ---------------------------------------------------------------- */
-  section('10. 句式库 / 图谱')
+  section('10. 句式库')
   const phrases = await invoke<PhraseEntry[]>('phrases:list')
   check('句式库返回数组', Array.isArray(phrases))
-  const graph = await invoke<GraphData>('graph:snapshot')
-  check(
-    '图谱快照形状正确',
-    Array.isArray(graph.nodes) &&
-      Array.isArray(graph.edges) &&
-      typeof graph.stats.totalPapers === 'number',
-    `papers=${graph.stats.totalPapers}`
-  )
-  const hop = await invoke<{ paths: unknown[]; maxHops: number }>(
-    'graph:multiHop',
-    `p:${created.id}`,
-    2
-  )
-  check('多跳检索返回结构完整', Array.isArray(hop.paths) && hop.maxHops === 2)
 
   /* ---------------------------------------------------------------- */
   section('11. 重新扫描：幂等 + 能发现外部改动')
@@ -588,10 +619,7 @@ async function main(): Promise<void> {
    * 渲染层的「导出 Markdown」靠它把前言补回去，重建过的 body 里没有前言。
    */
   const detailAfterBulk = await invoke<PaperDetail | null>('paper:get', manual.id)
-  check(
-    'paper:get 的 body 是磁盘原文，带着手写前言',
-    !!detailAfterBulk?.body.includes('我的批注')
-  )
+  check('paper:get 的 body 是磁盘原文，带着手写前言', !!detailAfterBulk?.body.includes('我的批注'))
 
   /*
    * 再把文件改个名。`readPaperSections` 专门支持这件事（索引记的是真实路径），
@@ -744,7 +772,10 @@ async function main(): Promise<void> {
     'figures:list',
     'no-such-paper'
   )
-  check('没截过图的论文返回空列表而不是报错', unknownList.ok === true && unknownList.figures?.length === 0)
+  check(
+    '没截过图的论文返回空列表而不是报错',
+    unknownList.ok === true && unknownList.figures?.length === 0
+  )
 
   const delNote = await invoke<{ ok: boolean }>('figures:delete', 'papers/whatever.md')
   check('删除只认图片扩展名', delNote.ok === false)
@@ -894,10 +925,7 @@ async function main(): Promise<void> {
   // 和流程图同一个坑位：普通保存不能把这个新字段弄丢
   await invoke<BulkResult>('paper:bulkUpdate', { ids: [aiPaper.id], addTags: ['标注测试'] })
   const afterAi = await invoke<PaperDetail | null>('paper:get', aiPaper.id)
-  check(
-    '批量改属性之后 ai 标记还在（读改写必须透传）',
-    afterAi?.meta.highlights?.[0]?.ai === true
-  )
+  check('批量改属性之后 ai 标记还在（读改写必须透传）', afterAi?.meta.highlights?.[0]?.ai === true)
   check(
     '「为什么重要」的备注也还在',
     afterAi?.meta.highlights?.[0]?.note?.includes('核心方法') === true
@@ -911,7 +939,17 @@ async function main(): Promise<void> {
    * 「批量加个标签」构造出来的 meta 不带它们 —— 写入时若不沿用磁盘旧值，
    * 随便保存一次，图和题就都没了。
    */
-  section('18. 思维导图与自测题：能写进去，也不会被普通保存抹掉')
+  section('18. 思维导图与已下线功能的历史字段：能写进去，也不会被普通保存抹掉')
+
+  /*
+   * quiz / slides / links / graph 这些字段所属的功能已经下线，字段本身保留为
+   * `unknown` 透传（见 shared/types.ts 的说明）。这里断言的就是那条透传：
+   * 写进去能读回、普通保存不会把它抹掉 —— 一旦丢了就读不出来，用户磁盘上的
+   * 老数据也就永久没了。
+   */
+  type QuizShape = { questions: { answer: number; why: string; source?: string }[] }
+  const quizOf = (d: PaperDetail | null): QuizShape | undefined =>
+    d?.meta.quiz as QuizShape | undefined
 
   const richPaper = await invoke<PaperDetail>('paper:create', { title: '带导图和自测题的论文' })
   const richMd = join(vaultDir, 'papers', `${richPaper.id}.md`)
@@ -934,7 +972,13 @@ async function main(): Promise<void> {
       quiz: {
         createdAt: '2026-09-16T00:00:00.000Z',
         questions: [
-          { q: '问题一？', options: ['甲', '乙', '丙', '丁'], answer: 0, why: '解析一', source: '§1' },
+          {
+            q: '问题一？',
+            options: ['甲', '乙', '丙', '丁'],
+            answer: 0,
+            why: '解析一',
+            source: '§1'
+          },
           { q: '问题二？', options: ['甲', '乙'], answer: 1, why: '解析二' },
           { q: '问题三？', options: ['甲', '乙', '丙'], answer: 2, why: '解析三' }
         ]
@@ -953,8 +997,8 @@ async function main(): Promise<void> {
     readRich?.meta.mindmap?.root.children?.length === 2
   )
   check(
-    '详情里能读回自测题',
-    readRich?.meta.quiz?.questions.length === 3 && readRich.meta.quiz?.questions[0].answer === 0
+    '详情里能读回已下线功能的历史字段',
+    quizOf(readRich)?.questions.length === 3 && quizOf(readRich)?.questions[0].answer === 0
   )
 
   await invoke<BulkResult>('paper:bulkUpdate', { ids: [richPaper.id], addTags: ['沉淀测试'] })
@@ -964,16 +1008,481 @@ async function main(): Promise<void> {
     afterRich?.meta.mindmap?.root.children?.length === 2
   )
   check(
-    '批量改属性之后自测题还在',
-    afterRich?.meta.quiz?.questions.length === 3,
-    `${afterRich?.meta.quiz?.questions.length ?? 0} 题`
+    '批量改属性之后历史字段还在',
+    quizOf(afterRich)?.questions.length === 3,
+    `${quizOf(afterRich)?.questions.length ?? 0} 题`
   )
   check(
-    '题里的解析和出处也还在（丢了解析，答错的人就不知道回哪里重读）',
-    afterRich?.meta.quiz?.questions[0].why === '解析一' &&
-      afterRich?.meta.quiz?.questions[0].source === '§1'
+    '题里的解析和出处也原样保留',
+    quizOf(afterRich)?.questions[0].why === '解析一' &&
+      quizOf(afterRich)?.questions[0].source === '§1'
   )
   await invoke('paper:delete', richPaper.id)
+
+  /* ---------------------------------------------------------------- */
+  section('19. 专题（手动把论文归到一组）')
+  const paperA = await invoke<PaperDetail>('paper:create', { title: '专题成员甲' })
+  const paperB = await invoke<PaperDetail>('paper:create', { title: '专题成员乙' })
+  const paperC = await invoke<PaperDetail>('paper:create', { title: '专题成员丙' })
+
+  const createdCol = await invoke<PaperCollection>('collection:create', {
+    title: 'VLA 阅读周',
+    description: '集中看的具身智能论文',
+    paperIds: [paperA.id, paperB.id, 'ghost-id-should-drop']
+  })
+  const colPath = join(vaultDir, 'collections', `${createdCol.id}.md`)
+  check('专题 Markdown 已落盘', existsSync(colPath))
+  const colText = readFileSync(colPath, 'utf-8')
+  check(
+    'frontmatter 带上了标题和成员',
+    colText.includes('VLA 阅读周') && colText.includes(paperA.id)
+  )
+  check('不存在的论文 id 不会写进专题', !createdCol.paperIds.includes('ghost-id-should-drop'))
+  check(
+    '创建时带上的两篇都在',
+    createdCol.paperIds.includes(paperA.id) && createdCol.paperIds.includes(paperB.id)
+  )
+
+  const listedCols = await invoke<PaperCollection[]>('collection:list')
+  check(
+    '列表里能看到刚建的专题',
+    listedCols.some((c) => c.id === createdCol.id)
+  )
+
+  const added = await invoke<PaperCollection>('collection:addPapers', createdCol.id, [
+    paperC.id,
+    paperA.id
+  ])
+  check(
+    '加入第三篇，已有的不重复',
+    added.paperIds.length === 3 && added.paperIds.includes(paperC.id)
+  )
+
+  const removed = await invoke<PaperCollection>('collection:removePapers', createdCol.id, [
+    paperB.id
+  ])
+  check(
+    '能把一篇从专题移出',
+    !removed.paperIds.includes(paperB.id) && removed.paperIds.length === 2
+  )
+
+  const renamed = await invoke<PaperCollection>('collection:update', {
+    id: createdCol.id,
+    title: 'VLA 阅读周（改）',
+    notes: '这组论文的方法可以串成一条演进线。'
+  })
+  check('改名生效', renamed.title === 'VLA 阅读周（改）')
+  check(
+    '专题笔记写进了正文',
+    readFileSync(colPath, 'utf-8').includes('这组论文的方法可以串成一条演进线')
+  )
+
+  await invoke('paper:delete', paperA.id)
+  const afterPaperDelete = await invoke<PaperCollection | null>('collection:get', createdCol.id)
+  check(
+    '删论文时会从专题成员里剪掉',
+    !!afterPaperDelete &&
+      !afterPaperDelete.paperIds.includes(paperA.id) &&
+      afterPaperDelete.paperIds.includes(paperC.id)
+  )
+
+  const scan = await invoke<ScanResult>('vault:rescan')
+  check('重建索引不把专题弄丢', scan.indexed >= 2)
+  const afterScan = await invoke<PaperCollection[]>('collection:list')
+  check(
+    '重建索引后专题还在、笔记还在',
+    afterScan.some((c) => c.id === createdCol.id && c.notes.includes('演进线'))
+  )
+
+  await invoke('collection:delete', createdCol.id)
+  check('删除专题会拿走 Markdown', !existsSync(colPath))
+  check(
+    '删除专题后列表里没有它',
+    (await invoke<PaperCollection[]>('collection:list')).every((c) => c.id !== createdCol.id)
+  )
+  check(
+    '删专题不会误删论文',
+    (await invoke<PaperSummary[]>('paper:list')).some((p) => p.id === paperC.id)
+  )
+
+  await invoke('paper:delete', paperB.id)
+  await invoke('paper:delete', paperC.id)
+
+  /* ------------------------------------------------------------------ */
+  section('20. 开放问题池与参考文献对照')
+
+  const limitText =
+    '作者自陈：只在仿真环境验证，长时程任务成功率明显下降。审稿发现：缺少多随机种子，基线偏弱，消融不完整。'
+  const probA = await invoke<PaperDetail>('paper:create', {
+    title: 'Closed-Loop Multi-Robot Manipulation',
+    arxivId: '2501.00001',
+    sections: { 局限与未来工作: limitText }
+  })
+  const probB = await invoke<PaperDetail>('paper:create', {
+    title: 'Keypoint Constraints for Spatial Reasoning',
+    sections: { 局限与未来工作: `${limitText} 另外没有真机实验。` }
+  })
+
+  const probStatus = await invoke<{ total: number; ready: number }>('problems:status', 'all')
+  check('问题池能数出写好了局限的论文', probStatus.ready >= 2, `ready=${probStatus.ready}`)
+  check('还没汇总过时 problems:get 返回 null', (await invoke('problems:get', 'all')) === null)
+
+  const probBuild = await invoke<{ ok: boolean; message?: string }>('problems:build', 'all')
+  check(
+    '原料够了会走到模型调用（没 Key 时返回业务错误而不是抛异常）',
+    !probBuild.ok && /API Key/.test(probBuild.message ?? ''),
+    probBuild.message
+  )
+
+  const soloCol = await invoke<PaperCollection>('collection:create', {
+    title: '只有一篇',
+    paperIds: [probA.id]
+  })
+  const soloBuild = await invoke<{ ok: boolean; message?: string }>('problems:build', soloCol.id)
+  check(
+    '范围里不足 2 篇时直接说明原因',
+    !soloBuild.ok && (soloBuild.message ?? '').includes('至少要 2 篇'),
+    soloBuild.message
+  )
+  await invoke('collection:delete', soloCol.id)
+
+  const { writeProblemFile, writeRefsFile } = await import('../src/main/vault')
+  writeProblemFile(
+    vaultDir,
+    {
+      scope: 'all',
+      scopeTitle: '全库',
+      generatedAt: new Date().toISOString(),
+      paperIds: [probA.id, probB.id],
+      summary: '问题集中在真机验证。',
+      problems: [
+        {
+          // 故意不写 id：模拟改动之前落盘的问题文件
+          title: '缺少真机验证',
+          detail: 'P1、P2 都只在仿真里做。',
+          source: 'both',
+          paperIds: [probA.id, probB.id, 'ghost-paper'],
+          direction: ''
+        } as OpenProblem
+      ]
+    },
+    (id) => id
+  )
+  check('问题池 Markdown 已落盘', existsSync(join(vaultDir, 'problems', 'all.md')))
+  const probRead = await invoke<{ problems: { id: string; paperIds: string[] }[] } | null>(
+    'problems:get',
+    'all'
+  )
+  check(
+    '问题池能读回，不在参与名单里的论文 id 会被丢掉',
+    probRead?.problems.length === 1 && probRead.problems[0].paperIds.length === 2
+  )
+  check('老问题文件没有 id 时按标题补上，并且稳定', !!probRead?.problems[0].id)
+
+  const { linkProblems } = await import('@shared/problems')
+  const linked = linkProblems(
+    [
+      {
+        id: '',
+        title: '缺少真机实验',
+        detail: '',
+        source: 'both',
+        paperIds: [probA.id, probB.id],
+        direction: ''
+      }
+    ],
+    [
+      {
+        id: 'p-keep',
+        title: '缺少真机验证',
+        detail: '',
+        source: 'both',
+        paperIds: [probA.id, probB.id],
+        direction: ''
+      }
+    ]
+  )
+  check(
+    '标题变了但出处论文大半重合时沿用旧 id',
+    linked.problems[0].id === 'p-keep' && linked.renamed[0]?.to === '缺少真机实验'
+  )
+
+  check('还没生成过选题时选题本为空', (await invoke<ResearchIdea[]>('ideas:list')).length === 0)
+  const ideaGone = await invoke<{ ok: boolean; message?: string }>(
+    'ideas:generate',
+    'all',
+    '问题池里没有的问题'
+  )
+  check(
+    '问题池重新汇总后旧问题不在了，生成选题给出说明',
+    !ideaGone.ok && (ideaGone.message ?? '').includes('问题池'),
+    ideaGone.message
+  )
+  const ideaGen = await invoke<{ ok: boolean; message?: string }>(
+    'ideas:generate',
+    'all',
+    '缺少真机验证'
+  )
+  check(
+    '找到问题后会走到模型调用（没 Key 时返回业务错误）',
+    !ideaGen.ok && /API Key/.test(ideaGen.message ?? ''),
+    ideaGen.message
+  )
+
+  let stubPrompt = ''
+  const stub = createServer((req, res) => {
+    let body = ''
+    req.on('data', (c) => (body += c))
+    req.on('end', () => {
+      stubPrompt = body
+      const ideas = [
+        {
+          title: '只换感知前端的真机迁移',
+          hypothesis: '瓶颈在感知而不是策略',
+          approach: '沿用 P1 的策略，换掉视觉编码器',
+          experiment: '两个任务各 20 次真机试验，对比成功率',
+          falsifier: '换前端后成功率不升反降',
+          gaps: '',
+          papers: ['P2', 'L99']
+        },
+        { title: '缺反证条件的', hypothesis: 'h', experiment: 'e', papers: ['P1'] }
+      ]
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(
+        JSON.stringify({
+          choices: [{ message: { content: JSON.stringify({ ideas }) }, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 10, completion_tokens: 10 }
+        })
+      )
+    })
+  })
+  await new Promise<void>((r) => stub.listen(0, '127.0.0.1', r))
+  const stubPort = (stub.address() as { port: number }).port
+  const llmBefore = (await invoke<AppSettings>('settings:get')).llm
+  await invoke('settings:set', {
+    llm: { ...llmBefore, baseUrl: `http://127.0.0.1:${stubPort}/v1`, apiKey: 'stub-key' }
+  })
+  const ideaReal = await invoke<{ ok: boolean; message?: string; ideas?: ResearchIdea[] }>(
+    'ideas:generate',
+    'all',
+    '缺少真机验证'
+  )
+  await invoke('settings:set', { llm: llmBefore })
+  stub.close()
+  check('假模型下生成成功', ideaReal.ok, ideaReal.message)
+  check('缺反证条件的那条被丢掉，只留一条', ideaReal.ideas?.length === 1)
+  const genIdea = ideaReal.ideas?.[0]
+  check(
+    '编号 P2 映射回真实论文，不存在的 L99 被丢掉',
+    genIdea?.paperIds.length === 1 && genIdea.paperIds[0] === probB.id
+  )
+  check(
+    '新选题带上了来源问题和范围，状态是待评估',
+    genIdea?.problem === '缺少真机验证' && genIdea.scope === 'all' && genIdea.status === 'new'
+  )
+  check(
+    'prompt 里带了问题和出处论文的笔记',
+    stubPrompt.includes('缺少真机验证') && stubPrompt.includes('Closed-Loop Multi-Robot')
+  )
+  if (genIdea) {
+    check('生成的选题已落盘', existsSync(join(vaultDir, 'ideas', `${genIdea.id}.md`)))
+    await invoke('ideas:delete', genIdea.id)
+  }
+
+  const { newIdeaId, writeIdeaFile } = await import('../src/main/vault')
+  const ideaId = newIdeaId('仿真到真机的最小迁移实验')
+  const now = new Date().toISOString()
+  writeIdeaFile(
+    vaultDir,
+    {
+      id: ideaId,
+      title: '仿真到真机的最小迁移实验',
+      hypothesis: '只换感知前端就能保住 80% 的仿真成功率。',
+      approach: '',
+      experiment: '两个任务、一台机械臂，对比原方法与换前端后的成功率。',
+      falsifier: '真机成功率低于仿真的一半。',
+      gaps: '',
+      paperIds: [probA.id, 'ghost-paper'],
+      problem: '缺少真机验证',
+      scope: 'all',
+      status: 'new',
+      note: '',
+      createdAt: now,
+      updatedAt: now
+    },
+    (id) => id
+  )
+  const ideaPath = join(vaultDir, 'ideas', `${ideaId}.md`)
+  check('选题 Markdown 已落盘', existsSync(ideaPath))
+  const listedIdeas = await invoke<ResearchIdea[]>('ideas:list')
+  check(
+    '选题本能列出来，已不在库的论文引用被滤掉',
+    listedIdeas.length === 1 && listedIdeas[0].paperIds.join() === probA.id
+  )
+  const { relinkIdeas } = await import('../src/main/problem-service')
+  check(
+    '问题改名后，按旧标题挂着的选题会改挂到新标题并记上 id',
+    relinkIdeas(vaultDir, 'all', [{ id: 'p-keep', from: '缺少真机验证', to: '缺少真机实验' }]) === 1
+  )
+  const relinked = await invoke<ResearchIdea[]>('ideas:list')
+  check(
+    '改挂写进了文件',
+    relinked[0]?.problem === '缺少真机实验' && relinked[0]?.problemId === 'p-keep'
+  )
+
+  // 问答 agent 的工具：对着真实的库和文件跑一遍
+  const { chatTools, resolvePaper } = await import('../src/main/chat-tools')
+  const tools = new Map(chatTools().map((t) => [t.spec.name, t]))
+  const runTool = (name: string, args: Record<string, unknown>): string =>
+    tools.get(name)?.run(args) ?? `missing tool ${name}`
+  check(
+    '工具按标题也能找到论文',
+    resolvePaper('Keypoint Constraints for Spatial Reasoning')?.id === probB.id
+  )
+  check(
+    '工具按 id 找论文',
+    resolvePaper(probA.id)?.title === 'Closed-Loop Multi-Robot Manipulation'
+  )
+  const searched = runTool('search_library', { query: 'Keypoint' })
+  check(
+    'search_library 返回带 id 的命中',
+    searched.includes(probB.id) && searched.includes('Keypoint')
+  )
+  check(
+    'search_library 没命中时给出换个说法的提示',
+    runTool('search_library', { query: 'zzznothinghere' }).includes('没有同时包含')
+  )
+  const noteIndex = runTool('read_note', { paper: probA.id })
+  check('read_note 不给章节时列出有内容的章节', noteIndex.includes('局限与未来工作（'))
+  const noteBody = runTool('read_note', { paper: probA.id, section: '局限' })
+  check('read_note 按章节名模糊匹配并返回全文', noteBody.includes('只在仿真环境验证'))
+  check(
+    'search_source 在没有原文时如实说明',
+    runTool('search_source', { paper: probA.id, keywords: ['simulation'] }).includes(
+      '没有抽取过原文'
+    )
+  )
+  check('list_problems 读到问题池', runTool('list_problems', {}).includes('缺少真机验证'))
+  check(
+    'list_ideas 读到选题与状态',
+    runTool('list_ideas', {}).includes('仿真到真机的最小迁移实验') &&
+      runTool('list_ideas', {}).includes('待评估')
+  )
+  const chatNoKey = await invoke<{ ok: boolean; message?: string }>(
+    'ai:chat',
+    [probA.id],
+    [{ role: 'user', content: '这篇的局限是什么？' }],
+    undefined,
+    { streamId: 'smoke-chat' }
+  )
+  check(
+    '问答没配 Key 时返回业务错误而不是抛异常',
+    !chatNoKey.ok && /API Key/.test(chatNoKey.message ?? ''),
+    chatNoKey.message
+  )
+  check(
+    '取消一个不存在的问答返回 false',
+    (await invoke<boolean>('ai:cancelChat', 'nope')) === false
+  )
+
+  const ideaUpdated = await invoke<ResearchIdea>('ideas:update', ideaId, {
+    status: 'pursuing',
+    note: '先借实验室的 UR5 试一周。'
+  })
+  check('改状态生效', ideaUpdated.status === 'pursuing')
+  check(
+    '备注写进了可读正文',
+    readFileSync(ideaPath, 'utf-8').includes('## 我的备注') &&
+      readFileSync(ideaPath, 'utf-8').includes('UR5')
+  )
+  const ideaBogus = await invoke<ResearchIdea>('ideas:update', ideaId, {
+    status: 'whatever' as ResearchIdea['status']
+  })
+  check('非法状态不会写进去', ideaBogus.status === 'pursuing')
+  check('删除选题会拿走 Markdown', (await invoke('ideas:delete', ideaId)) === true)
+  check('删除后文件不在了', !existsSync(ideaPath))
+
+  const { normalizeIdeaDrafts } = await import('@shared/ideas')
+  const drafts = normalizeIdeaDrafts(
+    [
+      { title: '完整的', hypothesis: 'h', experiment: 'e', falsifier: 'f', papers: ['P1'] },
+      { title: '缺反证条件', hypothesis: 'h', experiment: 'e', papers: ['P1'] }
+    ],
+    (ref) => (ref === 'P1' ? probA.id : null)
+  )
+  check(
+    '缺「反证条件」的选题会被丢掉',
+    drafts.length === 1 && drafts[0].title === '完整的' && drafts[0].paperIds[0] === probA.id
+  )
+
+  check('没抽过参考文献时 refs:get 返回 null', (await invoke('refs:get', probB.id)) === null)
+  const refsNoText = await invoke<{ ok: boolean; message?: string }>('refs:extract', probB.id)
+  check(
+    '没有原文时抽取参考文献给出说明',
+    !refsNoText.ok && (refsNoText.message ?? '').includes('原文'),
+    refsNoText.message
+  )
+
+  writeRefsFile(vaultDir, probB.id, {
+    extractedAt: new Date().toISOString(),
+    refs: [
+      { title: 'Some unrelated title', authors: 'Doe et al.', year: 2024, arxivId: '2501.00001' },
+      { title: 'Keypoint Constraints for Spatial Reasoning', authors: '', year: null, arxivId: '' },
+      {
+        title: 'Language Models are Few-Shot Learners',
+        authors: 'Brown et al.',
+        year: 2020,
+        arxivId: ''
+      }
+    ]
+  })
+  type RefList = { items: { title: string; paperId: string | null }[] }
+  const refs = await invoke<RefList | null>('refs:get', probB.id)
+  check('按 arXiv 编号匹配到库里的论文', refs?.items[0].paperId === probA.id)
+  check('不会把自己匹配成自己的参考文献', refs?.items[1].paperId === null)
+  check('库里没有的标为未入库', refs?.items[2].paperId === null)
+
+  const afterAdd = await invoke<RefList>('refs:addToLibrary', probB.id, 2)
+  const addedId = afterAdd.items[2].paperId
+  check('加入待读后这条参考文献变成在库', !!addedId)
+  const addedPaper = (await invoke<PaperSummary[]>('paper:list')).find((p) => p.id === addedId)
+  check(
+    '新建的待读条目带上了标题和状态',
+    addedPaper?.title === 'Language Models are Few-Shot Learners' && addedPaper?.status === 'inbox'
+  )
+  const againAdd = await invoke<RefList>('refs:addToLibrary', probB.id, 2)
+  check(
+    '重复点「加入待读」不会建出第二条',
+    (await invoke<PaperSummary[]>('paper:list')).filter(
+      (p) => p.title === 'Language Models are Few-Shot Learners'
+    ).length === 1 && againAdd.items[2].paperId === addedId
+  )
+
+  const { extractReferenceBlock, matchReferences } = await import('@shared/references')
+  const block = extractReferenceBlock(
+    [
+      '## Introduction',
+      'We cite things.',
+      'References',
+      'not the real heading',
+      '## References',
+      '[1] A. Author. Real Paper. 2020.',
+      '## A Implementation Details',
+      'appendix text'
+    ].join('\n')
+  )
+  check(
+    '参考文献段取最后一个标题、在附录前截止',
+    block.startsWith('[1] A. Author') && !block.includes('appendix'),
+    JSON.stringify(block)
+  )
+  const shortTitle = matchReferences(
+    [{ title: 'Attention', authors: '', year: null, arxivId: '' }],
+    [{ id: 'x', title: 'Attention Is All You Need For Everything Ever' }]
+  )
+  check('很短的标题不靠「包含」去误配', shortTitle[0].paperId === null)
+
+  for (const id of [probA.id, probB.id, addedId]) if (id) await invoke('paper:delete', id)
 
   console.log('')
   console.log(`${pass}/${pass + fail} 通过`)

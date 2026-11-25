@@ -1,5 +1,17 @@
 import { useEffect, useRef, useState } from 'react'
-import { Bot, Copy, History, Loader2, Plus, Send, Trash2 } from 'lucide-react'
+import {
+  BookmarkPlus,
+  Bot,
+  Copy,
+  History,
+  Loader2,
+  Plus,
+  Search,
+  Send,
+  Square,
+  Trash2
+} from 'lucide-react'
+import type { ChatScope } from '@shared/api'
 import type { ChatMessage } from '@shared/types'
 import { cn, errorMessage, formatDate } from '@/lib/utils'
 import { useAppStore } from '@/store/useAppStore'
@@ -25,12 +37,30 @@ const EMPTY_THREAD: ChatBubble[] = []
 /** 同上，给「一组论文下的对话列表」用的稳定空数组 */
 const EMPTY_SESSIONS: ChatSession[] = []
 
+/**
+ * compositionend 之后多久内的回车算「上屏候选词」，不当作发送（毫秒）。
+ *
+ * 只在「compositionend 比 keydown 早到」的时序里才起作用，而这个时序本身就是
+ * 异常路径 —— 100ms 足够把这一下吞掉，又不至于让用户正常按的回车被吃掉
+ * （人打完字再回车，间隔远大于 100ms；真的被吃掉一次也只是再按一下）。
+ */
+const IME_COMMIT_GRACE_MS = 100
+
 export function ChatPanel({
   paperIds,
-  emptyHint
+  emptyHint,
+  presets = PRESETS,
+  scope,
+  onSaveAnswer,
+  saveLabel = '存到笔记'
 }: {
   paperIds: string[]
   emptyHint?: string
+  presets?: string[]
+  scope?: ChatScope
+  /** 给了就在每条回答下面多一个「存档」按钮；question 是这条回答对应的提问 */
+  onSaveAnswer?: (answer: string, question: string) => Promise<void> | void
+  saveLabel?: string
 }): JSX.Element {
   const settings = useAppStore((s) => s.settings)
   const papers = useAppStore((s) => s.papers)
@@ -57,11 +87,56 @@ export function ChatPanel({
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const [historyOpen, setHistoryOpen] = useState(false)
+  /** 上一轮因为笔记太长没带上的论文 */
+  const [omitted, setOmitted] = useState<string[]>([])
   const scrollRef = useRef<HTMLDivElement>(null)
+  /** 正在流式生成的那条回答：正文增量 + 最近一条进度说明 */
+  const [live, setLive] = useState<{ text: string; status: string | null }>({
+    text: '',
+    status: null
+  })
+  const streamIdRef = useRef<string | null>(null)
+  /** 这次提问落在哪条对话；切到别的对话时不把生成中的气泡画过去 */
+  const [liveSession, setLiveSession] = useState<string | undefined>()
+  /** 同一份正文的 ref 版本：send() 在出错时要拿到截至此刻已经吐出来的内容 */
+  const liveTextRef = useRef('')
+
+  useEffect(
+    () =>
+      window.papervault.app.onStreamDelta(({ streamId, delta, status }) => {
+        if (streamId !== streamIdRef.current) return
+        liveTextRef.current += delta
+        setLive((prev) => ({
+          text: prev.text + delta,
+          status: status ?? (delta ? null : prev.status)
+        }))
+      }),
+    []
+  )
+
+  /*
+   * 输入法（IME）状态。回车发送最大的坑就在这里：中文输入法里**回车是「上屏候选词」**，
+   * 同一个按键既要选词又要把消息发出去，用户会在句子只打了一半时被发出去。
+   *
+   * 为什么要三份状态而不是只看 e.nativeEvent.isComposing：各家时序不一致 ——
+   * 组词中的回车通常带 isComposing，但实测有输入法会在 compositionend **之后**
+   * 才补一个 isComposing=false 的 Enter（老 Safari / 部分第三方输入法），
+   * 只看它就会漏。所以三判据一起用，多一层都不多余：
+   *   1. 正在组词（isComposing / keyCode 229）—— 直接不发
+   *   2. 组词还没结束（compositionstart 之后没收到 end）
+   *   3. 刚刚结束组词（下面这个时间戳，兜住「先 end 后 keydown」的时序）
+   */
+  const composing = useRef(false)
+  const compositionEndedAt = useRef(0)
+
+  useEffect(() => setOmitted([]), [threadKey])
 
   useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
-  }, [messages, loading])
+    scrollRef.current?.scrollTo({
+      top: scrollRef.current.scrollHeight,
+      behavior: 'smooth'
+    })
+  }, [messages, loading, live.status, live.text.length > 0])
 
   const titles = papers.filter((p) => paperIds.includes(p.id)).map((p) => p.title)
 
@@ -83,46 +158,91 @@ export function ChatPanel({
       return
     }
     const history: ChatMessage[] = [...messages, { role: 'user', content }]
+    const memo = session?.memo
     append(threadKey, { role: 'user', content })
+    // 记下这一问落在哪条对话：回答回来时用户可能已经切走了
+    const sessionId = useChatStore.getState().active[threadKey]
+    setLiveSession(sessionId)
+    const streamId = `chat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    streamIdRef.current = streamId
+    liveTextRef.current = ''
+    setLive({ text: '', status: null })
     setInput('')
     setLoading(true)
     try {
       /*
        * 只把 role / content 发下去。这段 history 会原样透传给模型，
-       * 多带一个本地用的 id 字段对校验严格的接口来说是没必要的风险。
+       * 多带一个本地用的 id / trace 字段对校验严格的接口来说是没必要的风险。
        */
       const res = await window.papervault.ai.chat(
         paperIds,
-        history.map(({ role, content: c }) => ({ role, content: c }))
+        history.map(({ role, content: c }) => ({ role, content: c })),
+        scope,
+        { streamId, memo }
       )
+      if (sessionId && res.memo) useChatStore.getState().setMemo(threadKey, sessionId, res.memo)
+      setOmitted(res.omitted ?? [])
       if (res.ok) {
-        append(threadKey, { role: 'assistant', content: res.content })
+        append(
+          threadKey,
+          { role: 'assistant', content: res.content, ...(res.trace ? { trace: res.trace } : {}) },
+          sessionId
+        )
       } else {
-        useAppStore.getState().toast(res.message ?? '请求失败', 'error')
+        const partial = liveTextRef.current
+        if (partial.trim()) {
+          append(
+            threadKey,
+            { role: 'assistant', content: `${partial.trim()}\n\n_（${res.message ?? '已中断'}）_` },
+            sessionId
+          )
+        }
+        if (res.message !== '任务已取消。') {
+          useAppStore.getState().toast(res.message ?? '请求失败', 'error')
+        }
       }
     } catch (err) {
       useAppStore.getState().toast(`请求失败：${errorMessage(err)}`, 'error')
     } finally {
+      streamIdRef.current = null
+      setLive({ text: '', status: null })
       setLoading(false)
     }
+  }
+
+  const stop = (): void => {
+    if (streamIdRef.current) void window.papervault.ai.cancelChat(streamIdRef.current)
   }
 
   return (
     <div className="flex h-full flex-col">
       <div className="mb-3 flex items-start gap-2 rounded-xl border border-line bg-bg-raised px-3 py-2.5">
         <Bot className="mt-0.5 h-3.5 w-3.5 shrink-0 text-brand-soft" />
-        <div className="min-w-0 flex-1 text-[11.5px] leading-relaxed text-ink-mid">
+        <div className="min-w-0 flex-1 text-meta leading-relaxed text-ink-mid">
           {paperIds.length ? (
             <>
-              基于 <span className="text-ink-high">{paperIds.length}</span> 篇笔记回答：
+              基于
+              {scope?.title ? (
+                <>
+                  专题「<span className="text-ink-high">{scope.title}</span>
+                  」的{' '}
+                </>
+              ) : null}
+              <span className="text-ink-high">{paperIds.length}</span> 篇笔记回答：
               <span className="text-ink-low">
                 {titles.slice(0, 3).join('、')}
                 {titles.length > 3 ? ` 等 ${titles.length} 篇` : ''}
               </span>
             </>
           ) : (
-            emptyHint ?? '选择论文后可以向 AI 提问。回答只基于你的笔记，不会凭空编造。'
+            (emptyHint ?? '选择论文后可以向 AI 提问。回答只基于你的笔记，不会凭空编造。')
           )}
+          {omitted.length ? (
+            <span className="mt-1 block text-caption text-warn">
+              笔记太长，这次没带上：{omitted.map((t) => `《${t}》`).join('、')}
+              。需要时模型会自己去查。
+            </span>
+          ) : null}
         </div>
         <div className="flex shrink-0 items-center gap-0.5">
           {session && session.messages.length ? (
@@ -162,11 +282,12 @@ export function ChatPanel({
                           }}
                           className="min-w-0 flex-1 text-left"
                         >
-                          <span className="block truncate text-[11.5px] text-ink-mid">
+                          <span className="block truncate text-meta text-ink-mid">
                             {s.title || '（还没提问）'}
                           </span>
-                          <span className="block text-[10px] text-ink-low">
-                            {s.messages.length} 条 · {formatDate(new Date(s.updatedAt).toISOString())}
+                          <span className="block text-caption text-ink-low">
+                            {s.messages.length} 条 ·{' '}
+                            {formatDate(new Date(s.updatedAt).toISOString())}
                           </span>
                         </button>
                         <button
@@ -195,25 +316,25 @@ export function ChatPanel({
       <div ref={scrollRef} className="min-h-[280px] flex-1 space-y-3 overflow-y-auto pr-1">
         {messages.length === 0 ? (
           <div className="space-y-1.5">
-            {PRESETS.map((p) => (
+            {presets.map((p) => (
               <button
                 key={p}
                 onClick={() => void send(p)}
-                className="block w-full rounded-lg border border-line px-3 py-2 text-left text-[12px] text-ink-mid transition hover:border-strong hover:text-ink-high"
+                className="block w-full rounded-lg border border-line px-3 py-2 text-left text-ui text-ink-mid transition hover:border-strong hover:text-ink-high"
               >
                 {p}
               </button>
             ))}
           </div>
         ) : (
-          messages.map((m) => (
+          messages.map((m, i) => (
             <div
               key={m.id}
               className={cn('flex flex-col', m.role === 'user' ? 'items-end' : 'items-start')}
             >
               <div
                 className={cn(
-                  'max-w-[88%] rounded-xl px-3.5 py-2.5 text-[12.5px]',
+                  'max-w-[88%] rounded-xl px-3.5 py-2.5 text-ui',
                   m.role === 'user'
                     ? 'bg-brand/20 text-ink-high'
                     : 'border border-line bg-bg-raised'
@@ -225,26 +346,60 @@ export function ChatPanel({
                   <span className="whitespace-pre-wrap">{m.content}</span>
                 )}
               </div>
+              {m.trace?.length ? (
+                <div
+                  className="mt-1 flex max-w-[88%] items-start gap-1 text-caption text-ink-low"
+                  title={m.trace.join('\n')}
+                >
+                  <Search className="mt-[2px] h-3 w-3 shrink-0" />
+                  <span className="line-clamp-2">查阅了：{m.trace.join(' · ')}</span>
+                </div>
+              ) : null}
               {/*
                 复制按钮**常显**，不做成悬停才出现 —— 它是这个面板上最常用的动作之一，
                 藏起来就等于没有（找不着按钮的人不会去猜「是不是要悬停一下」）。
                 复制的是 Markdown 原文，粘进笔记里标题、列表、代码块都还在。
               */}
-              <button
-                title="复制这段文本（Markdown 原文）"
-                onClick={() => void copyMessage(m.content)}
-                className="mt-1 flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10.5px] text-ink-low transition hover:bg-white/[0.06] hover:text-ink-high"
-              >
-                <Copy className="h-3 w-3" />
-                复制
-              </button>
+              <div className="mt-1 flex items-center gap-1">
+                <button
+                  title="复制这段文本（Markdown 原文）"
+                  onClick={() => void copyMessage(m.content)}
+                  className="flex items-center gap-1 rounded-md px-1.5 py-0.5 text-caption text-ink-low transition hover:bg-white/[0.06] hover:text-ink-high"
+                >
+                  <Copy className="h-3 w-3" />
+                  复制
+                </button>
+                {onSaveAnswer && m.role === 'assistant' ? (
+                  <button
+                    title="把这条回答连同提问追加到笔记末尾"
+                    onClick={() => {
+                      const question = messages
+                        .slice(0, i)
+                        .reverse()
+                        .find((x) => x.role === 'user')?.content
+                      void onSaveAnswer(m.content, question ?? '')
+                    }}
+                    className="flex items-center gap-1 rounded-md px-1.5 py-0.5 text-caption text-ink-low transition hover:bg-white/[0.06] hover:text-brand-mist"
+                  >
+                    <BookmarkPlus className="h-3 w-3" />
+                    {saveLabel}
+                  </button>
+                ) : null}
+              </div>
             </div>
           ))
         )}
-        {loading ? (
-          <div className="flex items-center gap-2 text-[12px] text-ink-mid">
-            <Loader2 className="h-3.5 w-3.5 animate-spin text-brand-soft" />
-            正在阅读你的笔记…
+        {loading && liveSession === session?.id ? (
+          <div className="flex flex-col items-start">
+            {live.text ? (
+              <div className="max-w-[88%] rounded-xl border border-line bg-bg-raised px-3.5 py-2.5 text-ui">
+                <Markdown content={live.text} />
+              </div>
+            ) : null}
+            <div className="mt-1 flex items-center gap-2 text-meta text-ink-mid">
+              <Loader2 className="h-3.5 w-3.5 animate-spin text-brand-soft" />
+              {live.status ?? (live.text ? '正在写…' : '正在阅读你的笔记…')}
+            </div>
           </div>
         ) : null}
       </div>
@@ -254,22 +409,50 @@ export function ChatPanel({
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-              e.preventDefault()
-              void send(input)
+            if (e.key !== 'Enter') return
+            const native = e.nativeEvent
+            // 上屏候选词的那一下回车：不发（理由见上面 composing 的注释）
+            if (
+              native.isComposing ||
+              native.keyCode === 229 ||
+              composing.current ||
+              Date.now() - compositionEndedAt.current < IME_COMMIT_GRACE_MS
+            ) {
+              return
             }
+            // Shift + Enter 换行：多行提问仍然写得出来
+            if (e.shiftKey) return
+            e.preventDefault()
+            void send(input)
+          }}
+          onCompositionStart={() => {
+            composing.current = true
+          }}
+          onCompositionEnd={() => {
+            composing.current = false
+            compositionEndedAt.current = Date.now()
           }}
           rows={2}
-          placeholder="问点什么…（⌘/Ctrl + Enter 发送）"
+          placeholder="问点什么…（回车发送，Shift + 回车换行）"
           className="field resize-none"
         />
-        <button
-          onClick={() => void send(input)}
-          disabled={loading || !input.trim()}
-          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-brand text-[#EDEAE0] transition hover:bg-brand-soft disabled:opacity-40"
-        >
-          <Send className="h-4 w-4" />
-        </button>
+        {loading ? (
+          <button
+            onClick={stop}
+            title="停止生成（已经写出来的部分会保留）"
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-strong text-ink-high transition hover:bg-white/[0.08]"
+          >
+            <Square className="h-3.5 w-3.5 fill-current" />
+          </button>
+        ) : (
+          <button
+            onClick={() => void send(input)}
+            disabled={!input.trim()}
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-brand text-ink-high transition hover:bg-brand-soft disabled:opacity-40"
+          >
+            <Send className="h-4 w-4" />
+          </button>
+        )}
       </div>
     </div>
   )

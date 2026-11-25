@@ -25,11 +25,14 @@
  */
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
+import type { ChatMemo } from '@shared/api'
 import type { ChatMessage } from '@shared/types'
 
 /** 渲染层自己用的气泡：比 `ChatMessage` 多一个稳定 id 供 React 做 key */
 export interface ChatBubble extends ChatMessage {
   id: string
+  /** 回答这条时模型查阅过的东西；只给人看，不回传给模型 */
+  trace?: string[]
 }
 
 /** 一组论文下的一条对话 */
@@ -40,13 +43,15 @@ export interface ChatSession {
   /** 最后一条消息的时间，历史列表按它从新到旧排 */
   updatedAt: number
   messages: ChatBubble[]
+  /** 较早轮次的压缩摘要（主进程生成、这里保管），见 ChatMemo */
+  memo?: ChatMemo
 }
 
 /**
- * 单条对话保留的消息上限。
+ * 单条对话保留的消息上限，超出的从最旧的丢。
  *
- * localStorage 装得下的量远大于这个数，这里卡住是因为**每轮提问都会把整段历史
- * 发给模型** —— 历史无限长下去，token 账单会悄悄失控。超出的从最旧的丢。
+ * 发给模型的量由主进程的压缩控制（较早轮次压成 memo），这里只是防止
+ * localStorage 无限长下去。
  */
 const MAX_KEPT = 200
 
@@ -61,7 +66,12 @@ interface ChatState {
   threads: Record<string, ChatSession[]>
   /** 论文集合 key → 当前正在看的那条对话；没有就落到列表第一条 */
   active: Record<string, string | undefined>
-  append: (key: string, message: ChatMessage) => void
+  /**
+   * 追加一条消息。给了 sessionId 就写进那一条（回答回来时用户可能已经切到别的对话），
+   * 否则写进当前这条。
+   */
+  append: (key: string, message: ChatMessage & { trace?: string[] }, sessionId?: string) => void
+  setMemo: (key: string, sessionId: string, memo: ChatMemo) => void
   /** 新开一条对话（旧的留在历史里） */
   newSession: (key: string) => void
   selectSession: (key: string, id: string) => void
@@ -79,7 +89,9 @@ export function chatThreadKey(paperIds: string[]): string {
 }
 
 function newId(): string {
-  return globalThis.crypto?.randomUUID?.() ?? `m-${Date.now()}-${Math.random().toString(36).slice(2)}`
+  return (
+    globalThis.crypto?.randomUUID?.() ?? `m-${Date.now()}-${Math.random().toString(36).slice(2)}`
+  )
 }
 
 /** 拿首个提问当标题（只取第一行，太长就截断）—— 历史列表里才认得出是哪一轮 */
@@ -92,21 +104,57 @@ function emptySession(): ChatSession {
   return { id: newId(), title: '', updatedAt: Date.now(), messages: [] }
 }
 
+/**
+ * 往一条对话里加一条消息。
+ * 超过 MAX_KEPT 从最旧的丢时，memo.upTo 要跟着前移 —— 它是「前多少条已被摘要覆盖」的下标，
+ * 不跟着挪就会指到错位的消息上，主进程会把没摘要过的轮次当成已覆盖跳过。
+ */
+export function withMessage(session: ChatSession, bubble: ChatBubble): ChatSession {
+  const all = [...session.messages, bubble]
+  const dropped = Math.max(0, all.length - MAX_KEPT)
+  const memo = session.memo
+    ? { ...session.memo, upTo: Math.max(0, session.memo.upTo - dropped) }
+    : undefined
+  return {
+    ...session,
+    // 标题只在第一条用户消息时定下来，之后不再改 —— 否则列表里的名字会一直变
+    title: session.title || (bubble.role === 'user' ? titleFrom(bubble.content) : ''),
+    updatedAt: Date.now(),
+    messages: dropped ? all.slice(dropped) : all,
+    ...(memo ? { memo } : {})
+  }
+}
+
 export const useChatStore = create<ChatState>()(
   persist(
     (set) => ({
       threads: {},
       active: {},
 
-      append: (key, message) =>
+      append: (key, message, sessionId) =>
         set((state) => {
           const bubble: ChatBubble = { ...message, id: newId() }
           const list = state.threads[key] ?? []
+          const pinned = sessionId ? list.findIndex((s) => s.id === sessionId) : -1
+          if (pinned >= 0) {
+            const session = list[pinned]
+            const next = withMessage(session, bubble)
+            return {
+              threads: { ...state.threads, [key]: list.map((s, i) => (i === pinned ? next : s)) }
+            }
+          }
           const activeId = state.active[key]
-          const index = activeId ? list.findIndex((s) => s.id === activeId) : list.length - 1
+          /*
+           * 写哪条，和界面显示哪条，必须是同一个口径。
+           * 面板显示的是 `find(activeId) ?? sessions[0]`，所以这里 activeId 失效时
+           * 也要落到列表第一条，而不是另开一条新的 —— 否则会出现「屏幕上显示第 1 条，
+           * 发出去的消息却进了新建的第 4 条」。
+           */
+          const index = activeId ? list.findIndex((s) => s.id === activeId) : -1
+          const target = index >= 0 ? index : list.length ? 0 : -1
 
-          // 还没有任何对话（或选中的那条被删了）→ 顺手开一条，别让消息无处可去
-          if (index < 0) {
+          // 一条对话都没有 → 顺手开一条，别让消息无处可去
+          if (target < 0) {
             const session: ChatSession = {
               ...emptySession(),
               title: bubble.role === 'user' ? titleFrom(bubble.content) : '',
@@ -118,19 +166,26 @@ export const useChatStore = create<ChatState>()(
             }
           }
 
-          const session = list[index]
-          const messages = [...session.messages, bubble]
-          const next: ChatSession = {
-            ...session,
-            // 标题只在第一条用户消息时定下来，之后不再改 —— 否则列表里的名字会一直变
-            title: session.title || (bubble.role === 'user' ? titleFrom(bubble.content) : ''),
-            updatedAt: Date.now(),
-            messages: messages.length > MAX_KEPT ? messages.slice(-MAX_KEPT) : messages
-          }
+          const session = list[target]
+          const next = withMessage(session, bubble)
           return {
             threads: {
               ...state.threads,
-              [key]: list.map((s, i) => (i === index ? next : s))
+              [key]: list.map((s, i) => (i === target ? next : s))
+            },
+            // 顺手把失效的指针修回来（activeId 指向已删会话时，它一直是坏的）
+            ...(target !== index ? { active: { ...state.active, [key]: session.id } } : {})
+          }
+        }),
+
+      setMemo: (key, sessionId, memo) =>
+        set((state) => {
+          const list = state.threads[key]
+          if (!list?.some((s) => s.id === sessionId)) return state
+          return {
+            threads: {
+              ...state.threads,
+              [key]: list.map((s) => (s.id === sessionId ? { ...s, memo } : s))
             }
           }
         }),
@@ -148,8 +203,7 @@ export const useChatStore = create<ChatState>()(
           }
         }),
 
-      selectSession: (key, id) =>
-        set((state) => ({ active: { ...state.active, [key]: id } })),
+      selectSession: (key, id) => set((state) => ({ active: { ...state.active, [key]: id } })),
 
       removeSession: (key, id) =>
         set((state) => {
@@ -177,13 +231,18 @@ export const useChatStore = create<ChatState>()(
         const threads: Record<string, ChatSession[]> = {}
         const active: Record<string, string | undefined> = {}
         for (const [key, messages] of Object.entries(old?.threads ?? {})) {
-          if (!Array.isArray(messages) || !messages.length) continue
-          const first = messages.find((m) => m.role === 'user')
+          // 防御：v1 数据里可能有损坏条目（元素为 null / content 缺失），
+          // 一旦在这里抛异常，zustand 会整个回退成空状态 —— 一段坏数据赔上全部历史
+          const clean = (Array.isArray(messages) ? messages : []).filter(
+            (m): m is ChatBubble => !!m && typeof m.content === 'string'
+          )
+          if (!clean.length) continue
+          const first = clean.find((m) => m.role === 'user')
           const session: ChatSession = {
             id: newId(),
             title: first ? titleFrom(first.content) : '',
             updatedAt: Date.now(),
-            messages
+            messages: clean
           }
           threads[key] = [session]
           active[key] = session.id

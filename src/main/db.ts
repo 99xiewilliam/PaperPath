@@ -3,22 +3,26 @@ import { dirname, join } from 'path'
 import type { Database } from 'sql.js'
 import { categoryLabel } from '@shared/taxonomy'
 import { normalizeExperimentProfile } from '@shared/experiment'
-import { normalizeLinks, type PaperLink } from '@shared/links'
 import { buildLikeClause } from '@shared/search'
 import { LEARNING_KEYS, normalizeLearningReview } from '@shared/learning'
 import { countEffectiveChars, extractTldr, isAiFilled, isSectionFilled } from '@shared/template'
 import type {
+  PaperCollection,
   PaperMeta,
   PaperStatus,
   PaperSummary,
   StatsOverview,
-  Synthesis,
-  SynthesisScope,
   TaxonomyNode
 } from '@shared/types'
 import type { ExperimentProfile } from '@shared/experiment'
 import type { Highlight } from '@shared/highlights'
-import type { EnglishPhrase, LensRunRecord, PaperGraph } from '@shared/lenses'
+import {
+  normalizePhrases,
+  pruneRetiredLenses,
+  type EnglishPhrase,
+  type LensRunRecord
+} from '@shared/lenses'
+import { normalizeWritingLogic, type WritingLogic } from '@shared/writing-logic'
 
 // sql.js 是 CJS/UMD 发布，这里用 require 规避 ESM 互操作差异
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -54,6 +58,8 @@ CREATE TABLE IF NOT EXISTS papers (
   exp          TEXT NOT NULL DEFAULT '{}',
   phrases      TEXT NOT NULL DEFAULT '[]',
   graph        TEXT NOT NULL DEFAULT '{}',
+  -- 写作逻辑卡的镜像（frontmatter 的 wlogic 才是唯一事实来源，见 shared/writing-logic.ts）
+  wlogic       TEXT NOT NULL DEFAULT '{}',
   highlights   TEXT NOT NULL DEFAULT '[]',
   learning_review TEXT NOT NULL DEFAULT '{}',
   -- 与库里其他论文的关系（frontmatter 的 links 在索引里的镜像，供构图用，见 shared/links.ts）
@@ -82,6 +88,17 @@ CREATE TABLE IF NOT EXISTS syntheses (
   content     TEXT NOT NULL DEFAULT '',
   rel_path    TEXT NOT NULL DEFAULT '',
   paper_count INTEGER NOT NULL DEFAULT 0,
+  created_at  INTEGER NOT NULL DEFAULT 0,
+  updated_at  INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS collections (
+  id          TEXT PRIMARY KEY,
+  title       TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  paper_ids   TEXT NOT NULL DEFAULT '[]',
+  notes       TEXT NOT NULL DEFAULT '',
+  rel_path    TEXT NOT NULL DEFAULT '',
   created_at  INTEGER NOT NULL DEFAULT 0,
   updated_at  INTEGER NOT NULL DEFAULT 0
 );
@@ -130,16 +147,34 @@ export async function openDatabase(vaultPath: string): Promise<void> {
   }
   db.exec(SCHEMA)
   const migrated = migrate()
+  const staleIndex = invalidateStaleSearchIndex()
 
   /*
    * 只有库真的动过才落盘。以前无条件 persistNow()，导致每次启动都要把
    * 整个 sqlite 重新序列化写一遍 —— 库越大越明显，而绝大多数启动其实
    * 什么也没变。markDirty() 在迁移过程中若写过数据也会把 dirty 置位。
    */
-  if (fresh || corrupt || migrated || dirty) persistNow()
+  if (fresh || corrupt || migrated || staleIndex || dirty) persistNow()
 }
 
 /** 老版本索引缺列时补齐（SQLite 的 ADD COLUMN 不支持 IF NOT EXISTS） */
+/**
+ * 索引格式（目前就是 search_blob 的截断上限）变了 → 把论文的文件指纹清掉，
+ * 让下一次重扫全量重算。返回是否动过库。
+ *
+ * 为什么必须有这条：重扫走的是「mtime/size 没变就跳过」的快路径，
+ * **连「重建索引」按钮都跳不过去** —— 上限一改，存量 blob 就永远停在旧内容上，
+ * 搜索照样搜不到后半段。而图谱 / 句式库这类只存在索引里的数据又不能靠删库重建
+ * 来修，所以只能在这里自愈。
+ */
+function invalidateStaleSearchIndex(): boolean {
+  if (!db) return false
+  if (metaGet('search_blob_limit') === String(SEARCH_BLOB_LIMIT)) return false
+  run('UPDATE papers SET file_mtime = 0, file_size = 0')
+  metaSet('search_blob_limit', String(SEARCH_BLOB_LIMIT))
+  return true
+}
+
 function migrate(): boolean {
   if (!db) return false
   let changed = false
@@ -147,6 +182,7 @@ function migrate(): boolean {
     "ALTER TABLE papers ADD COLUMN exp TEXT NOT NULL DEFAULT '{}'",
     "ALTER TABLE papers ADD COLUMN phrases TEXT NOT NULL DEFAULT '[]'",
     "ALTER TABLE papers ADD COLUMN graph TEXT NOT NULL DEFAULT '{}'",
+    "ALTER TABLE papers ADD COLUMN wlogic TEXT NOT NULL DEFAULT '{}'",
     'ALTER TABLE papers ADD COLUMN writing_notes INTEGER NOT NULL DEFAULT 0',
     'ALTER TABLE papers ADD COLUMN experiment_notes INTEGER NOT NULL DEFAULT 0',
     "ALTER TABLE papers ADD COLUMN last_run TEXT NOT NULL DEFAULT ''",
@@ -157,8 +193,14 @@ function migrate(): boolean {
     try {
       db.exec(sql)
       changed = true
-    } catch {
-      /* 列已存在 */
+    } catch (err) {
+      /*
+       * 只吞「列已存在」—— 迁移本来就是靠 ALTER 抛这个错来判断「早就加过」的。
+       * 其余错误（磁盘满、库损坏、权限）必须抛出去：静默吞掉会让迁移**看起来**
+       * 成功，而列其实没加上，之后所有查询都对着一个残缺的表跑。
+       */
+      const msg = err instanceof Error ? err.message : String(err)
+      if (!/duplicate column name/i.test(msg)) throw err
     }
   }
 
@@ -371,10 +413,20 @@ function run(sql: string, params: unknown[] = []): void {
 /**
  * search_blob 的截断上限。
  *
- * 真实的 AI 生成笔记约 5~12KB，12000 够用；上限放大到 40KB 会让索引体积和
- * 单次 LIKE 扫描时间都翻数倍，实测收益不划算（见 README「全文检索」一节）。
+ * 曾经是 12000，理由是「AI 生成的笔记约 5~12KB，够用」—— 这个假设已经不成立：
+ * 实测一个 14 篇的库**每一篇都顶在上限**，意味着每篇笔记的后半段和 PDF 原文片段
+ * （拼接顺序里排最后）根本没进索引，搜这些词永远搜不到，而用户会以为「搜索坏了」。
+ *
+ * 放宽的代价用 bench:search（2000 篇合成语料）量过：
+ *   上限 12KB → 文本 22.9MB / 单次扫描 36.5ms
+ *   上限 24KB → 文本 26.7MB / 43.2ms
+ *   上限 40KB → 文本 26.7MB / 43.5ms
+ * 24KB 之上体积不再增长（语料本身就只有这么大），远不是「翻数倍」。
+ * 40KB 取的是「大到不会截断真实笔记」的余量，而不是精确阈值。
+ *
+ * 改动这一行之后，存量库需要跑一次「重建索引」才会用新上限重算。
  */
-const SEARCH_BLOB_LIMIT = 12000
+const SEARCH_BLOB_LIMIT = 40000
 
 export function buildSearchBlob(
   meta: PaperMeta,
@@ -385,7 +437,9 @@ export function buildSearchBlob(
   // Keep the learner's own takeaways searchable even after a long AI analysis.
   const noteText = [
     ...LEARNING_KEYS.map((key) => sections[key] ?? ''),
-    ...Object.entries(sections).filter(([key]) => !LEARNING_KEYS.includes(key)).map(([, value]) => value)
+    ...Object.entries(sections)
+      .filter(([key]) => !LEARNING_KEYS.includes(key))
+      .map(([, value]) => value)
   ].join('\n')
   const exp = meta.exp
   const expText = exp
@@ -461,7 +515,7 @@ function deriveNoteMetrics(sections: Record<string, string>): {
  * 问号，数错一个就是整行错位 —— 而 SQLite 不会报错，只会把值静默塞进别的列。
  */
 const PAPER_UPSERT_COLUMNS = `id, title, authors, year, venue, url, arxiv_id, doi, status, rating, importance,
-  categories, tags, pdf, rel_path, exp, phrases, graph, highlights, links, tldr, search_blob,
+  categories, tags, pdf, rel_path, exp, phrases, graph, wlogic, highlights, links, tldr, search_blob,
   char_count, ai_filled, writing_notes, experiment_notes, file_mtime, file_size,
   created_at, updated_at, learning_review, last_run`
 
@@ -474,7 +528,12 @@ export function upsertPaper(input: IndexPaperInput): void {
   const tldr = extractTldr(sections)
   const charCount = countEffectiveChars(sections)
   const aiFilled = isAiFilled(sections) ? 1 : 0
-  const blob = buildSearchBlob(meta, sections, input.customCategories ?? [], input.textSnippet ?? '')
+  const blob = buildSearchBlob(
+    meta,
+    sections,
+    input.customCategories ?? [],
+    input.textSnippet ?? ''
+  )
   const createdAt = Date.parse(meta.createdAt) || Date.now()
   const updatedAt = Date.parse(meta.updatedAt) || Date.now()
   const expJson = JSON.stringify(meta.exp ?? normalizeExperimentProfile(null))
@@ -493,13 +552,22 @@ export function upsertPaper(input: IndexPaperInput): void {
    * 显式的 `[]` / `{}` 仍然是「确实要清空」，不会被误判成「没传」。
    */
   const stored = all(
-    'SELECT phrases, graph, highlights, links, last_run FROM papers WHERE id = ?',
+    'SELECT phrases, graph, wlogic, highlights, links, last_run FROM papers WHERE id = ?',
     [meta.id]
   )[0]
   const phrasesWrite = meta.phrases ?? parseJson<EnglishPhrase[]>(stored?.phrases, [])
-  const graphWrite = meta.graph ?? parseJson<PaperGraph | undefined>(stored?.graph, undefined)
+  // 图谱是已下线功能，索引列仍在：undefined = 不携带、保留原值（老库里的数据不丢）
+  const graphWrite = meta.graph ?? parseJson<unknown>(stored?.graph, undefined)
+  /*
+   * wlogic 走和 graph 完全一样的语义：undefined = 本次调用不携带，保留库里的；
+   * `{}` = 明确清空。少了这一条，rescanVault（改自定义分类就会触发）会把
+   * 全库的写作逻辑卡一起清掉 —— 而它是套路库的唯一数据来源。
+   */
+  const wlogicWrite =
+    meta.wlogic ?? normalizeWritingLogic(parseJson<unknown>(stored?.wlogic, undefined))
   const highlightsWrite = meta.highlights ?? parseJson<Highlight[]>(stored?.highlights, [])
-  const linksWrite = meta.links ?? normalizeLinks(parseJson<PaperLink[]>(stored?.links, []), meta.id)
+  // 关系同样是已下线功能：不携带就保留库里原值
+  const linksWrite = meta.links ?? parseJson<unknown>(stored?.links, [])
 
   run(
     `INSERT OR REPLACE INTO papers
@@ -524,6 +592,7 @@ export function upsertPaper(input: IndexPaperInput): void {
       expJson,
       JSON.stringify(phrasesWrite),
       JSON.stringify(graphWrite ?? {}),
+      JSON.stringify(wlogicWrite ?? {}),
       JSON.stringify(highlightsWrite),
       JSON.stringify(linksWrite),
       tldr,
@@ -559,10 +628,7 @@ export function removePaperRow(id: string): void {
  */
 export function setPaperRun(id: string, record: LensRunRecord | null): void {
   try {
-    run('UPDATE papers SET last_run = ? WHERE id = ?', [
-      record ? JSON.stringify(record) : '',
-      id
-    ])
+    run('UPDATE papers SET last_run = ? WHERE id = ?', [record ? JSON.stringify(record) : '', id])
   } catch (err) {
     // 记录运行结果失败绝不该把精读本身搞挂 —— 它只是诊断信息
     console.error('[db] 写入精读运行记录失败', err)
@@ -577,7 +643,7 @@ export function getPaperRun(id: string): LensRunRecord | null {
     const parsed = JSON.parse(raw) as LensRunRecord
     // 形状不对就当没有：这段 JSON 是给人看的诊断信息，不值得为它崩界面
     if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.lenses)) return null
-    return parsed
+    return pruneRetiredLenses(parsed)
   } catch {
     return null
   }
@@ -635,13 +701,15 @@ function mapPaperRow(row: Row): PaperSummary {
     categories: parseArr(row.categories),
     tags: parseArr(row.tags),
     exp: parseExp(row.exp),
-    phrases: parseJson<EnglishPhrase[]>(row.phrases, []),
-    graph: parseJson<PaperGraph | undefined>(row.graph, undefined),
-    learningReview: normalizeLearningReview(parseJson(row.learning_review, undefined)),
-    links:
-      row.links === undefined
-        ? undefined
-        : normalizeLinks(parseJson<PaperLink[]>(row.links, []), String(row.id ?? '')),
+    /*
+     * 过一遍归一化，而不是直接信 JSON。
+     *
+     * 索引里可能存着 `{}` 这种空壳（老版本写进去的），透出去的话，拿到它的人
+     * 只要写一句 `graph.entities.length` 就崩 —— 实测崩在**保存笔记**那一步，
+     * 整篇 frontmatter 都写不出去。归一化顺带保证 relations 键存在、kind 是已知值，
+     * 下游就不用到处写防御性代码。
+     */
+    phrases: normalizePhrases(parseJson<EnglishPhrase[]>(row.phrases, [])),
     tldr: String(row.tldr ?? ''),
     updatedAt: new Date(num(row.updated_at)).toISOString(),
     relPath: String(row.rel_path ?? ''),
@@ -652,8 +720,8 @@ function mapPaperRow(row: Row): PaperSummary {
 }
 
 const PAPER_COLUMNS = `id, title, authors, year, venue, url, arxiv_id, doi, status, rating,
-  importance, categories, tags, pdf, rel_path, exp, phrases, graph, highlights, links, tldr, char_count,
-  ai_filled, writing_notes, experiment_notes, created_at, updated_at, learning_review`
+  importance, categories, tags, pdf, rel_path, exp, phrases, graph, wlogic, highlights, links, tldr,
+  char_count, ai_filled, writing_notes, experiment_notes, created_at, updated_at, learning_review`
 
 const SUMMARY_COLUMNS = `id, title, authors, year, venue, url, arxiv_id, doi, status, rating,
   importance, categories, tags, pdf, rel_path, exp, phrases, graph, links, tldr,
@@ -677,6 +745,40 @@ const LIST_COLUMNS = `id, title, authors, year, venue, url, arxiv_id, doi, statu
 export function listPaperSummaries(): PaperSummary[] {
   const rows = all(`SELECT ${LIST_COLUMNS} FROM papers ORDER BY updated_at DESC`)
   return rows.map(mapPaperRow)
+}
+
+/** 「写作思路」页一行：论文身份 + 它的写作逻辑卡 */
+export interface WritingLogicRow {
+  id: string
+  title: string
+  year: number | null
+  categories: string[]
+  updatedAt: string
+  wlogic?: WritingLogic
+}
+
+/**
+ * 只给「写作思路」页用的窄查询。
+ *
+ * 为什么不把 wlogic 塞进 PaperSummary：卡片是几百字到两千字的 JSON，
+ * 而列表页每次刷新都会整份传一遍 —— 和图谱、句式库当初被移出列表载荷
+ * 是同一个理由（见 LIST_COLUMNS 上的注释）。这个页面按需拉，拉一次就够。
+ */
+export function listWritingLogicRows(): WritingLogicRow[] {
+  const rows = all(
+    'SELECT id, title, year, categories, updated_at, wlogic FROM papers ORDER BY updated_at DESC'
+  )
+  return rows.map((row) => {
+    const logic = normalizeWritingLogic(parseJson<unknown>(row.wlogic, undefined))
+    return {
+      id: String(row.id ?? ''),
+      title: String(row.title ?? ''),
+      year: row.year == null ? null : Number(row.year),
+      categories: parseArr(row.categories),
+      updatedAt: new Date(Number(row.updated_at ?? 0)).toISOString(),
+      ...(logic ? { wlogic: logic } : {})
+    }
+  })
 }
 
 /**
@@ -734,96 +836,33 @@ export function paperMetaFromRow(row: Row): PaperMeta {
     tags: s.tags,
     exp: s.exp,
     phrases: s.phrases,
-    graph: s.graph,
-    learningReview: s.learningReview,
     // 高亮此前只存在 Markdown 里、索引缺这一列，导致所有保存路径都以为「没有高亮」
     // 而把 frontmatter 里的 highlights 键删掉 —— 详见 migrate() 里的说明
     highlights: parseJson<Highlight[]>(row.highlights, []),
     /*
-     * 列不在 SELECT 里时返回 undefined，而不是空数组 —— 空数组会被下游当成
-     * 「这篇没有关系」写回去，把 Markdown 里真正的关系抹掉；undefined 走
-     * 「没传就沿用库里原值」那条规则（见 upsertPaper）。
-     * 目前几个列清单都带 links（构图也要用它），这条是给「将来为瘦身而省略它」
-     * 留的保险 —— 高亮当年就是这么整库丢的。
+     * 已下线功能的历史字段。列缺失时给 undefined（=「本次不携带」，落盘沿用磁盘值），
+     * 而不是空值 —— 空值会被下游当成「这篇没有数据」写回去，把老数据抹掉。
      */
-    links:
-      row.links === undefined
+    graph: row.graph === undefined ? undefined : parseJson<unknown>(row.graph, undefined),
+    links: row.links === undefined ? undefined : parseJson<unknown>(row.links, []),
+    learningReview:
+      row.learning_review === undefined
         ? undefined
-        : normalizeLinks(parseJson<PaperLink[]>(row.links, []), String(row.id ?? '')),
+        : normalizeLearningReview(parseJson<unknown>(row.learning_review, undefined)),
+    /*
+     * 和 links 同一条规则：列缺失时给 undefined（=「本次不携带」，
+     * 落盘时沿用磁盘值），而不是 `{}`（=「明确清空」）。
+     * 这条路径是精读写回时构造 nextMeta 用的 —— 给错成空值，
+     * 一次只跑某个维度的重跑就会把整张写作逻辑卡清掉。
+     */
+    wlogic:
+      row.wlogic === undefined
+        ? undefined
+        : normalizeWritingLogic(parseJson<unknown>(row.wlogic, undefined)),
     pdf: String(row.pdf ?? ''),
     createdAt: new Date(Number(row.created_at ?? Date.now())).toISOString(),
     updatedAt: s.updatedAt
   }
-}
-
-/* ------------------------------------------------------------------ */
-/*  综述文档                                                            */
-/* ------------------------------------------------------------------ */
-
-export interface UpsertSynthesisInput {
-  id: string
-  title: string
-  scope: SynthesisScope
-  content: string
-  relPath: string
-  paperCount: number
-  createdAt?: string
-  updatedAt?: string
-}
-
-export function upsertSynthesis(input: UpsertSynthesisInput): void {
-  const existing = all('SELECT created_at FROM syntheses WHERE id = ?', [input.id])[0]
-  const createdAt =
-    input.createdAt != null
-      ? Date.parse(input.createdAt)
-      : existing
-        ? Number(existing.created_at)
-        : Date.now()
-  run(
-    `INSERT OR REPLACE INTO syntheses
-     (id, title, scope, content, rel_path, paper_count, created_at, updated_at)
-     VALUES (?,?,?,?,?,?,?,?)`,
-    [
-      input.id,
-      input.title,
-      JSON.stringify(input.scope),
-      input.content,
-      input.relPath,
-      input.paperCount,
-      createdAt,
-      input.updatedAt ? Date.parse(input.updatedAt) : Date.now()
-    ]
-  )
-}
-
-export function removeSynthesisRow(id: string): void {
-  run('DELETE FROM syntheses WHERE id = ?', [id])
-}
-
-export function listSyntheses(): Synthesis[] {
-  const rows = all('SELECT * FROM syntheses ORDER BY updated_at DESC')
-  return rows.map((row) => {
-    let scope: SynthesisScope = { type: 'category', value: '' }
-    try {
-      scope = JSON.parse(String(row.scope ?? '{}')) as SynthesisScope
-    } catch {
-      /* ignore */
-    }
-    return {
-      id: String(row.id ?? ''),
-      title: String(row.title ?? ''),
-      scope,
-      content: String(row.content ?? ''),
-      relPath: String(row.rel_path ?? ''),
-      paperCount: Number(row.paper_count ?? 0),
-      createdAt: new Date(Number(row.created_at ?? 0)).toISOString(),
-      updatedAt: new Date(Number(row.updated_at ?? 0)).toISOString()
-    }
-  })
-}
-
-export function getSynthesis(id: string): Synthesis | null {
-  return listSyntheses().find((s) => s.id === id) ?? null
 }
 
 /* ------------------------------------------------------------------ */
@@ -919,28 +958,6 @@ export function computeStats(custom: TaxonomyNode[] = []): StatsOverview {
   }
 }
 
-/**
- * 图谱缓存失效用的指纹。
- *
- * 论文增删、任何一篇的 graph 字段变化、**或者论文关系变化**，都会让这个字符串改变。
- *
- * `links` 必须算进来：关系是用户随时会改的东西（连一条、删一条），而它改动时
- * graph 与 updated_at 都不一定会变 —— 漏了它，刚连好的关系在图谱页上根本不出现，
- * 得等别的字段碰巧变了才刷新。这类「改了看不见」最难查。
- */
-export function graphStamp(): string {
-  if (!db) return '0:0:0:0'
-  const rows = all(
-    `SELECT COUNT(*) AS c,
-            COALESCE(SUM(LENGTH(graph)), 0) AS g,
-            COALESCE(SUM(LENGTH(links)), 0) AS l,
-            COALESCE(MAX(updated_at), 0) AS t
-     FROM papers`
-  )
-  const row = rows[0] ?? {}
-  return `${row.c ?? 0}:${row.g ?? 0}:${row.l ?? 0}:${row.t ?? 0}`
-}
-
 export function paperCount(): number {
   const rows = all('SELECT COUNT(*) AS c FROM papers')
   return Number(rows[0]?.c ?? 0)
@@ -948,6 +965,66 @@ export function paperCount(): number {
 
 export function listPaperIds(): string[] {
   return all('SELECT id FROM papers').map((row) => String(row.id ?? ''))
+}
+
+/* ------------------------------------------------------------------ */
+/*  专题索引                                                            */
+/* ------------------------------------------------------------------ */
+
+function mapCollectionRow(row: Row): PaperCollection {
+  const num = (v: unknown, d = 0): number => (typeof v === 'number' ? v : Number(v ?? d) || d)
+  return {
+    id: String(row.id ?? ''),
+    title: String(row.title ?? ''),
+    description: String(row.description ?? ''),
+    paperIds: parseArr(row.paper_ids),
+    notes: String(row.notes ?? ''),
+    relPath: String(row.rel_path ?? ''),
+    createdAt: new Date(num(row.created_at)).toISOString(),
+    updatedAt: new Date(num(row.updated_at)).toISOString()
+  }
+}
+
+export function upsertCollection(collection: PaperCollection): void {
+  run(
+    `INSERT INTO collections (id, title, description, paper_ids, notes, rel_path, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       title = excluded.title,
+       description = excluded.description,
+       paper_ids = excluded.paper_ids,
+       notes = excluded.notes,
+       rel_path = excluded.rel_path,
+       created_at = excluded.created_at,
+       updated_at = excluded.updated_at`,
+    [
+      collection.id,
+      collection.title,
+      collection.description,
+      JSON.stringify(collection.paperIds),
+      collection.notes,
+      collection.relPath,
+      Date.parse(collection.createdAt) || Date.now(),
+      Date.parse(collection.updatedAt) || Date.now()
+    ]
+  )
+}
+
+export function listCollections(): PaperCollection[] {
+  return all('SELECT * FROM collections ORDER BY updated_at DESC').map(mapCollectionRow)
+}
+
+export function getCollection(id: string): PaperCollection | null {
+  const rows = all('SELECT * FROM collections WHERE id = ?', [id])
+  return rows[0] ? mapCollectionRow(rows[0]) : null
+}
+
+export function listCollectionIds(): string[] {
+  return all('SELECT id FROM collections').map((row) => String(row.id ?? ''))
+}
+
+export function removeCollectionRow(id: string): void {
+  run('DELETE FROM collections WHERE id = ?', [id])
 }
 
 export interface PaperFileStamp {
@@ -1007,9 +1084,4 @@ export function metaGet(key: string): string | null {
 
 export function metaSet(key: string, value: string): void {
   run('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)', [key, value])
-}
-
-export function synthesisCount(): number {
-  const rows = all('SELECT COUNT(*) AS c FROM syntheses')
-  return Number(rows[0]?.c ?? 0)
 }

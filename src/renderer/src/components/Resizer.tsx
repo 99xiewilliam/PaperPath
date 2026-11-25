@@ -5,9 +5,7 @@ import { PANEL_LIMITS, usePanelStore, type PanelId } from '@/store/usePanelStore
 
 const LABELS: Record<PanelId, string> = {
   sidebar: '侧栏宽度',
-  list: '论文列表宽度',
-  graphLeft: '图谱筛选栏宽度',
-  graphRight: '图谱详情栏宽度'
+  list: '论文列表宽度'
 }
 
 /**
@@ -92,7 +90,7 @@ export function Resizer({ id }: { id: PanelId }): JSX.Element {
         )}
       />
       {dragging ? (
-        <span className="pointer-events-none absolute left-1/2 top-7 z-[121] -translate-x-1/2 rounded-md border border-line bg-bg-overlay px-1.5 py-0.5 font-mono text-[10px] tabular-nums text-ink-mid shadow-lg">
+        <span className="pointer-events-none absolute left-1/2 top-7 z-[121] -translate-x-1/2 rounded-md border border-line bg-bg-overlay px-1.5 py-0.5 font-mono text-caption tabular-nums text-ink-mid shadow-lg">
           {width}px
         </span>
       ) : null}

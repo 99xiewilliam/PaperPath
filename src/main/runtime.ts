@@ -41,6 +41,13 @@ export function emitStreamDelta(streamId: string, delta: string): void {
   }
 }
 
+/** 同一条流上的进度说明（问答查资料时的「正在查：…」），不进正文 */
+export function emitStreamStatus(streamId: string, status: string): void {
+  for (const win of BrowserWindow.getAllWindows()) {
+    win.webContents.send('ai:stream', { streamId, delta: '', status })
+  }
+}
+
 export function describeTaskError(err: unknown): string {
   if (err instanceof TaskCancelledError) return '任务已取消。'
   if (err instanceof LlmError) return err.message
@@ -75,12 +82,24 @@ export function queuedTask<T extends { ok: boolean; message?: string }>(
  * 交互任务的包装：与 `queuedTask` 的唯一区别是**不排队**（见 tasks.ts 的 runInteractive）。
  *
  * 失败转返回值、extra 兜底字段这些口径保持一致，调用方不必为两种通道写两套错误处理。
- * 没有 label 参数是有意的：交互任务不发进度 —— 一旦发，顶部那条胶囊会被它抢走，
- * 而胶囊上的「取消」按钮取消的是批处理任务，点下去会取消错对象。
+ *
+ * 没有 label 参数是有意的：交互任务不进顶部胶囊 —— 一旦进去，
+ * 胶囊上的「取消」按钮会去取消批处理任务，点下去取消错对象。
+ * 但**进度本身是可以发的**（演示生成就在发，好让那个全屏浮层显示当前跑到哪一步），
+ * 前提是发出来的进度带上自己的 stage，别被别的界面当成批处理任务的进度。
+ *
+ * `key` 给长任务用：它让这个任务能被 `cancelInteractive(key)` **单独**取消。
  */
 export function interactiveTask<T extends { ok: boolean; message?: string }>(
   run: (signal: AbortSignal) => Promise<T>,
-  extra?: Omit<T, 'ok' | 'message'>
+  extra?: Omit<T, 'ok' | 'message'>,
+  /**
+   * 可选标识：给了就能被 `cancelInteractive(key)` **单独**取消。
+   *
+   * 排在 `extra` 后面而不是前面：`extra` 已经占着第二参数（划词那条在用），
+   * 挪它会静默改掉调用方的语义 —— 一个对象会被当成标识，取消行为随之失效。
+   */
+  key?: string
 ): Promise<T> {
   return runInteractive(async (signal) => {
     try {
@@ -88,7 +107,7 @@ export function interactiveTask<T extends { ok: boolean; message?: string }>(
     } catch (err) {
       return { ok: false, message: describeTaskError(err), ...(extra ?? {}) } as T
     }
-  })
+  }, key)
 }
 
 export function focusedWindow(): BrowserWindow | null {

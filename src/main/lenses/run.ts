@@ -1,9 +1,9 @@
-import type { LensId, LensRunEntry, LensRunRecord } from '@shared/lenses'
+import type { LensId, LensRunEntry, LensRunRecord, LensRunUsage } from '@shared/lenses'
 import type { LlmSettings, PaperMeta } from '@shared/types'
-import { chatCompletion, extractJson, LlmError } from '../llm'
+import { chatCompletion, extractJson, fingerprint, LlmError, type LlmCallRecord } from '../llm'
 import { currentSignal } from '../tasks'
 import { resolveLenses } from './index'
-import type { Lens, LensContext } from './types'
+import { lensSystemPrompt, type Lens, type LensContext } from './types'
 
 export interface LensRunOutcome {
   lensId: LensId
@@ -13,6 +13,8 @@ export interface LensRunOutcome {
   /** 成功但产出不全（只产出 2/3 节 / 被截断）；失败时为空 */
   note?: string
   sectionCount: number
+  /** 这个维度花了多少；失败也有 —— 失败的调用一样计费 */
+  usage?: LensRunUsage
 }
 
 export interface LensPipelineResult {
@@ -32,6 +34,47 @@ export interface LensPipelineOptions {
   /** 并发上限：既压缩总耗时，又不至于触发服务商限流 */
   concurrency?: number
   onProgress?: (message: string, lensId: LensId) => void
+}
+
+/**
+ * 单个维度的输出预算上限。
+ *
+ * 这个数不是「模型最多能吐多少」，而是「给到多大才既写得完、又不会一路写到超时」：
+ * 12 个维度跑满一篇 36 页论文的实测输出是 4.7K~14.6K token（最长的是具体例子
+ * 与写作手法这两类），32768 大约是其中最长者的两倍余量。再往上加不会让模型写得更好，
+ * 只会把预算耗在思考上 —— 之前直接给 131072 时就是这么跑到 300 秒超时的。
+ */
+export const LENS_TOKEN_CEILING = 32768
+
+/**
+ * 单次调用的超时。
+ *
+ * 必须跟着预算一起放宽，否则只是把失败换个名字：实测这个端点 45~60 token/s，
+ * 32768 预算理论最长要 ~12 分钟，而实测的 5K~15K 输出要 130~280 秒 ——
+ * 600 秒是后者的两倍余量。只放宽预算不放宽超时，就会从
+ * 「预算不够 → 正文为空」变成「预算够 → 请求超时」。
+ */
+export const LENS_TIMEOUT_MS = 600_000
+
+/**
+ * 一次调用的输出预算。
+ *
+ * 三个数一起决定：维度自己的体积预算（lens.meta.maxTokens，改 prompt 时一起调）、
+ * 用户配置的全局预算、以及上面的绝对上限。规则是「维度预算是地板、配置值是天花板」：
+ *
+ * - **地板**：维度预设值是这个维度写满需要多少，用户把全局值调小不该把它压垮；
+ * - **天花板取配置值**：推理型模型的思考 token 也从这里扣，所以 .env 里写 131072
+ *   是有理由的（它是模型的硬上限），配置值更大时应当照用 —— 只由绝对上限兜住。
+ *
+ * 这里曾经是 `Math.min(llm.maxTokens, lens.meta.maxTokens)`，本意是防止
+ * 「全局值给 131072 → 每个维度都能一直写 → 300 秒超时」。但它把 .env 里的
+ * 131072 变成了死配置：每个维度只剩 2K~4K。实测一篇 42 页论文（LIBERO-MAX）
+ * 12 个维度里 9 个返回空内容、3 个被截断，就是强制思考的模型把这点预算全花在
+ * reasoning 上造成的 —— 而同一批论文在预算放开时是 12 个全成的。
+ */
+export function lensTokenBudget(lensMaxTokens: number, configuredMaxTokens?: number): number {
+  const configured = configuredMaxTokens && configuredMaxTokens > 0 ? configuredMaxTokens : lensMaxTokens
+  return Math.max(lensMaxTokens, Math.min(configured, LENS_TOKEN_CEILING))
 }
 
 /**
@@ -56,11 +99,17 @@ export async function runLensPipeline(
   const runOne = async (lens: Lens): Promise<void> => {
     started++
     options.onProgress?.(`[${started}/${lenses.length}] ${lens.meta.label}…`, lens.id)
+    /*
+     * 这一笔账刻意不记在全局账本上：批处理队列与交互通道是**并行**的
+     * （见 tasks.ts 的 runInteractive），全局账本会把划词翻译的调用混进精读的账里。
+     * 每个维度各收各的，最后由 buildRunRecord 汇总。
+     */
+    let call: LlmCallRecord | undefined
     try {
       const prompt = lens.prompt(ctx)
       const res = await chatCompletion(
         [
-          { role: 'system', content: lens.system },
+          { role: 'system', content: lensSystemPrompt(lens, ctx) },
           {
             role: 'user',
             content: options.extraInstruction
@@ -69,7 +118,17 @@ export async function runLensPipeline(
           }
         ],
         llm,
-        { json: true, maxTokens: Math.max(llm.maxTokens, lens.meta.maxTokens) }
+        {
+          json: true,
+          // 预算怎么算、为什么不能取 min、为什么要有上限，见 lensTokenBudget
+          maxTokens: lensTokenBudget(lens.meta.maxTokens, llm.maxTokens),
+          // 预算放宽之后超时必须跟着放宽，否则只是把失败换个名字
+          timeoutMs: LENS_TIMEOUT_MS,
+          label: `lens:${lens.id}`,
+          onCall: (record) => {
+            call = record
+          }
+        }
       )
 
       const output = lens.parse(extractJson(res.content), ctx)
@@ -96,7 +155,8 @@ export async function runLensPipeline(
          * 状态条上就只剩一个干净的 ✓ —— 「只产出 1/3 节」又变成看不见了。
          */
         note: note || undefined,
-        sectionCount: produced.length
+        sectionCount: produced.length,
+        usage: usageOf(call)
       })
     } catch (err) {
       outcomes.push({
@@ -107,7 +167,9 @@ export async function runLensPipeline(
           err instanceof LlmError
             ? `${lens.meta.label}：${err.message}`
             : `${lens.meta.label}：${(err as Error).message}`,
-        sectionCount: 0
+        sectionCount: 0,
+        // 失败的调用一样计费，所以失败路径也要把用量带上
+        usage: usageOf(call)
       })
     }
   }
@@ -163,6 +225,55 @@ export function lensNote(produced: number, expected: number, truncated: boolean)
   return parts.join('　')
 }
 
+/** 单次调用的事实记录 → 一条用量。有的服务商不返回 usage，缺失一律按 0 计。 */
+function usageOf(call: LlmCallRecord | undefined): LensRunUsage | undefined {
+  if (!call) return undefined
+  return {
+    model: call.model,
+    prompt: call.prompt,
+    promptTokens: call.promptTokens ?? 0,
+    completionTokens: call.completionTokens ?? 0,
+    elapsedMs: call.elapsedMs,
+    requests: call.requests,
+    calls: 1,
+    truncated: call.truncated ? 1 : 0,
+    failed: call.ok ? 0 : 1
+  }
+}
+
+/**
+ * 把多个维度的用量合成一笔。
+ *
+ * `prompt` 合成「组合指纹」：各次指纹**排序后**拼接再哈希 —— 排序是必要的，并发
+ * 扇出的完成顺序不固定，不排序的话同一套 prompt 每次算出来的指纹都不一样，比不了。
+ * 合成之后，改了任意一个维度的 prompt 都会让运行档案里的指纹变化。
+ *
+ * 空数组返回 undefined 而不是一堆 0：宁可不显示，也不要显示「0 token」让人以为免费。
+ */
+export function mergeUsage(items: (LensRunUsage | undefined)[]): LensRunUsage | undefined {
+  const list = items.filter((u): u is LensRunUsage => !!u)
+  if (!list.length) return undefined
+  const models = [...new Set(list.map((u) => u.model).filter(Boolean))]
+  const sum = (pick: (u: LensRunUsage) => number): number =>
+    list.reduce((acc, u) => acc + pick(u), 0)
+  return {
+    model: models.join(','),
+    prompt: fingerprint(
+      list
+        .map((u) => u.prompt)
+        .sort()
+        .join('|')
+    ),
+    promptTokens: sum((u) => u.promptTokens),
+    completionTokens: sum((u) => u.completionTokens),
+    elapsedMs: sum((u) => u.elapsedMs),
+    requests: sum((u) => u.requests),
+    calls: sum((u) => u.calls),
+    truncated: sum((u) => u.truncated),
+    failed: sum((u) => u.failed)
+  }
+}
+
 /**
  * 把一次精读的结局整理成可以落盘的记录。
  *
@@ -186,7 +297,8 @@ export function buildRunRecord(
     label: o.label,
     ok: o.ok,
     message: o.message,
-    note: o.note
+    note: o.note,
+    usage: o.usage
   }))
   const failed = lenses.filter((l) => !l.ok)
   const cancelled =
@@ -209,7 +321,13 @@ export function buildRunRecord(
         : ((failure as Error)?.message ?? String(failure))
       : summarizeOutcomes(outcomes)
 
-  return { finishedAt: new Date().toISOString(), status, message, lenses }
+  return {
+    finishedAt: new Date().toISOString(),
+    status,
+    message,
+    lenses,
+    usage: mergeUsage(outcomes.map((o) => o.usage))
+  }
 }
 
 /**
@@ -235,24 +353,46 @@ export function mergeRunRecord(
   const lenses: LensRunEntry[] = previous.lenses.map((l) => {
     const o = next.get(l.id)
     return o
-      ? { id: o.lensId, label: o.label, ok: o.ok, message: o.message, note: o.note }
+      ? { id: o.lensId, label: o.label, ok: o.ok, message: o.message, note: o.note, usage: o.usage }
       : l
   })
   // 这次跑了、但上次记录里没有的维度（比如期间新启用了一个）补在末尾
   for (const o of outcomes) {
     if (!previous.lenses.some((l) => l.id === o.lensId)) {
-      lenses.push({ id: o.lensId, label: o.label, ok: o.ok, message: o.message, note: o.note })
+      lenses.push({
+        id: o.lensId,
+        label: o.label,
+        ok: o.ok,
+        message: o.message,
+        note: o.note,
+        usage: o.usage
+      })
     }
   }
 
+  /*
+   * 取消只看**本次**的 outcomes，不看合并后的历史。
+   *
+   * 历史里可能留着一条「任务已取消」（上次跑到一半被中断的那个维度），
+   * 拿它参与判定的话，用户之后单独重试成功、状态条也永远显示「已取消」——
+   * 一个改不掉的红色状态，看起来就像重试功能坏了。
+   */
   const cancelled =
     (failure instanceof LlmError && failure.cancelled) ||
-    lenses.some((l) => !l.ok && l.message.includes('任务已取消'))
+    outcomes.some((o) => !o.ok && o.message.includes('任务已取消'))
   const failed = lenses.filter((l) => !l.ok)
 
   let status: LensRunRecord['status']
   if (cancelled) status = 'cancelled'
-  else if (failure) status = 'failed'
+  else if (failure && !outcomes.length && previous.lenses.length) {
+    /*
+     * 部分重跑在「发出请求之前」就崩了（没原文 / 接口报错 / 知识库没打开）。
+     * 这不是「整篇精读失败」—— 整体状态沿用上一次，只把 message 换成这次的
+     * 错误原因。否则一条 4xx 会把另外 8 个本来成功的维度一起标成失败，
+     * 状态条从「部分失败 1 个」跳到「失败」，比不重试还吓人。
+     */
+    status = previous.status
+  } else if (failure) status = 'failed'
   else if (!lenses.length) status = 'failed'
   else if (!failed.length) status = 'ok'
   else if (failed.length < lenses.length) status = 'partial'
@@ -270,5 +410,15 @@ export function mergeRunRecord(
       ? `只重试了 ${outcomes.length} 个维度：${summarizeOutcomes(outcomes)}`
       : previous.message
 
-  return { finishedAt: new Date().toISOString(), status, message, lenses }
+  /*
+   * usage 记的是**本次**的，不与上一次相加：它回答的是「这次重跑花了多少」。
+   * 累加会让人以为整篇精读只花了这么点，也会把同一篇的消耗反复计入。
+   */
+  return {
+    finishedAt: new Date().toISOString(),
+    status,
+    message,
+    lenses,
+    usage: mergeUsage(outcomes.map((o) => o.usage))
+  }
 }

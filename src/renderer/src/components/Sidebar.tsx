@@ -5,14 +5,13 @@ import {
   ChevronDown,
   ChevronRight,
   FolderOpen,
-  Network,
+  Layers,
+  PenLine,
   Plus,
-  Quote,
   RefreshCw,
   Settings,
-  FileStack,
   Table2,
-  Upload
+  FileUp
 } from 'lucide-react'
 import { allCategories, groupCategories } from '@shared/taxonomy'
 import { STATUS_LABEL } from '@shared/types'
@@ -21,22 +20,29 @@ import { cn, formatNumber } from '@/lib/utils'
 import {
   selectVisiblePapers,
   useAppStore,
+  VIEW_GROUP,
   VIEW_LABEL,
   VIEW_ORDER,
   type ViewKey
 } from '@/store/useAppStore'
 import { useUiStore } from '@/store/useUiStore'
 import { usePanelStore } from '@/store/usePanelStore'
+import { AddToCollectionDialog } from './AddToCollectionDialog'
 import { IconButton } from './ui'
 
+/**
+ * 顶级入口只有四个：读 / 写 / 做实验 / 沉淀。
+ *
+ * 句式库、知识图谱、跨论文没有消失，只是搬到二级入口
+ * （句式库在「写作思路」第三个分区，后两个在「沉淀」页）。
+ * 设置也不算功能，挪到品牌区的齿轮上 —— 它和「读论文」「写论文」
+ * 不是同一层的东西，并列在那儿只会把功能列表撑长。
+ */
 const NAV: { key: ViewKey; icon: typeof BookOpen }[] = [
   { key: 'library', icon: BookOpen },
+  { key: 'writing', icon: PenLine },
   { key: 'compare', icon: Table2 },
-  { key: 'phrases', icon: Quote },
-  { key: 'graph', icon: Network },
-  { key: 'synthesis', icon: FileStack },
-  { key: 'dashboard', icon: BarChart3 },
-  { key: 'settings', icon: Settings }
+  { key: 'dashboard', icon: BarChart3 }
 ]
 
 const STATUS_ORDER: PaperStatus[] = ['inbox', 'reading', 'read', 'archived']
@@ -56,6 +62,9 @@ export function Sidebar(): JSX.Element {
   const openImport = useUiStore((s) => s.openImport)
   const openNewPaper = useUiStore((s) => s.openNewPaper)
 
+  const collections = useAppStore((s) => s.collections)
+  const selectCollection = useAppStore((s) => s.selectCollection)
+  const [createOpen, setCreateOpen] = useState(false)
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
   const isMac = window.papervault.app.platform === 'darwin'
   // 宽度可拖拽调（App 里的 <Resizer id="sidebar" />），钳制在 store 里
@@ -78,12 +87,13 @@ export function Sidebar(): JSX.Element {
     return map
   }, [papers])
 
-  const totalChars = useMemo(
-    () => papers.reduce((sum, p) => sum + p.charCount, 0),
-    [papers]
-  )
+  const totalChars = useMemo(() => papers.reduce((sum, p) => sum + p.charCount, 0), [papers])
 
-  const hasFilter = filters.categories.length > 0 || filters.status !== null || filters.onlyUnread
+  const hasFilter =
+    filters.categories.length > 0 ||
+    filters.status !== null ||
+    filters.onlyUnread ||
+    !!filters.collectionId
 
   const toggleGroup = (group: string): void =>
     setCollapsed((prev) => ({ ...prev, [group]: !prev[group] }))
@@ -99,7 +109,7 @@ export function Sidebar(): JSX.Element {
   return (
     <aside
       style={{ width }}
-      className="flex h-full shrink-0 flex-col border-r border-line bg-bg-raised"
+      className="flex h-full shrink-0 flex-col border-r border-line bg-bg-sunken"
     >
       {isMac ? <div className="app-drag h-9 shrink-0" /> : null}
 
@@ -111,18 +121,30 @@ export function Sidebar(): JSX.Element {
            * （ex libris）是「这本书属于某个读书人」的凭证，和产品同源。
            */}
           <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[7px] bg-gradient-to-b from-cuhk to-cuhk-deep shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_1px_2px_rgba(0,0,0,0.45)]">
-            <span className="font-serif text-[12.5px] italic leading-none tracking-tight text-ink-high">
+            <span className="font-serif text-ui italic leading-none tracking-tight text-ink-high">
               PV
             </span>
           </div>
           <div className="min-w-0 flex-1">
-            <div className="truncate font-serif text-[13.5px] font-semibold tracking-wide text-ink-high">
+            <div className="truncate font-serif text-body font-semibold tracking-wide text-ink-high">
               PaperVault
             </div>
-            <div className="truncate text-[10.5px] text-ink-low">论文智库 · 本地优先</div>
+            <div className="truncate text-caption text-ink-low">论文智库 · 本地优先</div>
           </div>
           <IconButton title="重新索引" onClick={() => void rescan()} className="app-no-drag">
             <RefreshCw className="h-3.5 w-3.5" />
+          </IconButton>
+          {/*
+            设置放在品牌区而不是导航里：它和「读论文 / 写论文」不是同一层的
+            东西。放在这一排的功能名旁边，只会让本来就该短的那一列更长。
+          */}
+          <IconButton
+            title="设置（⌘,）"
+            active={view === 'settings'}
+            onClick={() => setView('settings')}
+            className="app-no-drag"
+          >
+            <Settings className="h-3.5 w-3.5" />
           </IconButton>
         </div>
       </div>
@@ -134,10 +156,10 @@ export function Sidebar(): JSX.Element {
         >
           <FolderOpen className="h-3.5 w-3.5 shrink-0 text-ink-low" />
           <span className="min-w-0 flex-1">
-            <span className="block truncate text-[11.5px] text-ink-mid">
+            <span className="block truncate text-meta text-ink-mid">
               {vault.path.split('/').filter(Boolean).pop() || '未打开'}
             </span>
-            <span className="block text-[10px] text-ink-low">
+            <span className="block text-caption text-ink-low">
               {papers.length} 篇 · {formatNumber(totalChars)} 字沉淀
             </span>
           </span>
@@ -148,18 +170,23 @@ export function Sidebar(): JSX.Element {
       <nav className="app-no-drag px-2">
         {NAV.map((item) => {
           const Icon = item.icon
-          const active = view === item.key
+          /*
+           * 用 VIEW_GROUP 判高亮，而不是 view === item.key：
+           * 进到知识图谱 / 跨论文这类二级页时，导航不该整排全灭 ——
+           * 高亮停在「沉淀」上，用户才知道自己在哪一层、点一下能回去。
+           */
+          const active = VIEW_GROUP[view] === item.key
           const shortcut = VIEW_ORDER.indexOf(item.key) + 1
           return (
             <button
               key={item.key}
               onClick={() => setView(item.key)}
               className={cn(
-                'group mb-0.5 flex w-full items-center gap-2.5 rounded-md px-2.5 py-1.5 text-[12.5px] transition',
+                'group mb-0.5 flex w-full items-center gap-2.5 rounded-md px-2.5 py-1.5 text-ui transition',
                 active
                   ? /*
                      * 选中态收敛成「微抬起的底 + 白字 + 品牌色只给图标」：
-                     * 整行染色（旧 bg-brand/15 + 品牌色文字）七项导航全点上时，
+                     * 整行染色（旧 bg-brand/15 + 品牌色文字）在导航项多的时候，
                      * 左栏会变成一排紫色荧光条 —— 颜色只留在图标上，克制得多。
                      */
                     'bg-white/[0.07] font-medium text-ink-high shadow-[inset_0_1px_0_rgba(255,255,255,0.05)] [&_svg]:text-brand-soft'
@@ -170,11 +197,11 @@ export function Sidebar(): JSX.Element {
               {VIEW_LABEL[item.key]}
               <span className="ml-auto flex items-center gap-1.5">
                 {item.key === 'library' ? (
-                  <span className="text-[10.5px] text-ink-low">
+                  <span className="text-caption text-ink-low">
                     {hasFilter ? `${visibleCount}/${papers.length}` : papers.length}
                   </span>
                 ) : null}
-                <span className="text-[10px] text-ink-low opacity-0 transition group-hover:opacity-70">
+                <span className="text-caption text-ink-low opacity-0 transition group-hover:opacity-70">
                   ⌘{shortcut}
                 </span>
               </span>
@@ -187,7 +214,51 @@ export function Sidebar(): JSX.Element {
 
       <div className="app-no-drag min-h-0 flex-1 space-y-3 overflow-y-auto px-3 pb-3">
         <section>
-          <div className="mb-1.5 text-[10.5px] font-medium uppercase tracking-wider text-ink-low">
+          <div className="mb-1.5 flex items-center gap-1">
+            <div className="flex-1 text-caption font-medium uppercase tracking-wider text-ink-low">
+              专题
+            </div>
+            <IconButton title="新建专题" onClick={() => setCreateOpen(true)}>
+              <Plus className="h-3 w-3" />
+            </IconButton>
+          </div>
+          {collections.length ? (
+            <div className="space-y-[1px]">
+              {collections.map((c) => {
+                const active = filters.collectionId === c.id
+                return (
+                  <button
+                    key={c.id}
+                    title={c.description || c.title}
+                    onClick={() => selectCollection(c.id)}
+                    className={cn(
+                      'flex w-full items-center gap-2 rounded-md px-2 py-[5px] text-left text-ui transition',
+                      active
+                        ? 'bg-white/[0.08] text-ink-high'
+                        : 'text-ink-mid hover:bg-white/[0.04] hover:text-ink-high'
+                    )}
+                  >
+                    <Layers
+                      className={cn(
+                        'h-3 w-3 shrink-0',
+                        active ? 'text-brand-soft' : 'text-ink-low'
+                      )}
+                    />
+                    <span className="min-w-0 flex-1 truncate">{c.title}</span>
+                    <span className="text-caption text-ink-low">{c.paperIds.length}</span>
+                  </button>
+                )
+              })}
+            </div>
+          ) : (
+            <p className="px-2 py-1 text-meta leading-relaxed text-ink-low">
+              把集中看过的相关论文归到一组，之后可以指定 agent 专门分析。
+            </p>
+          )}
+        </section>
+
+        <section>
+          <div className="mb-1.5 text-caption font-medium uppercase tracking-wider text-ink-low">
             阅读状态
           </div>
           <div className="flex flex-wrap gap-1">
@@ -195,7 +266,9 @@ export function Sidebar(): JSX.Element {
               <button
                 key={status}
                 onClick={() => {
-                  setFilters({ status: filters.status === status ? null : status })
+                  setFilters({
+                    status: filters.status === status ? null : status
+                  })
                   if (view !== 'library') setView('library')
                 }}
                 className={cn(
@@ -224,7 +297,7 @@ export function Sidebar(): JSX.Element {
         </section>
 
         <section>
-          <div className="mb-1.5 text-[10.5px] font-medium uppercase tracking-wider text-ink-low">
+          <div className="mb-1.5 text-caption font-medium uppercase tracking-wider text-ink-low">
             分类体系
           </div>
           <div className="space-y-1.5">
@@ -234,7 +307,7 @@ export function Sidebar(): JSX.Element {
                 <div key={group.group}>
                   <button
                     onClick={() => toggleGroup(group.group)}
-                    className="mb-0.5 flex w-full items-center gap-1 text-[10.5px] font-medium uppercase tracking-wider text-ink-low transition hover:text-ink-mid"
+                    className="mb-0.5 flex w-full items-center gap-1 text-caption font-medium uppercase tracking-wider text-ink-low transition hover:text-ink-mid"
                   >
                     {isCollapsed ? (
                       <ChevronRight className="h-3 w-3" />
@@ -254,7 +327,7 @@ export function Sidebar(): JSX.Element {
                             title={node.description}
                             onClick={() => toggleCategory(node.id)}
                             className={cn(
-                              'flex w-full items-center gap-2 rounded-md px-2 py-[5px] text-left text-[12px] transition',
+                              'flex w-full items-center gap-2 rounded-md px-2 py-[5px] text-left text-ui transition',
                               active
                                 ? 'bg-white/[0.08] text-ink-high'
                                 : 'text-ink-mid hover:bg-white/[0.04] hover:text-ink-high'
@@ -269,7 +342,7 @@ export function Sidebar(): JSX.Element {
                             />
                             <span className="min-w-0 flex-1 truncate">{node.label}</span>
                             {count > 0 ? (
-                              <span className="text-[10.5px] text-ink-low">{count}</span>
+                              <span className="text-caption text-ink-low">{count}</span>
                             ) : null}
                           </button>
                         )
@@ -285,7 +358,7 @@ export function Sidebar(): JSX.Element {
         {hasFilter ? (
           <button
             onClick={resetFilters}
-            className="w-full rounded-lg border border-line py-1.5 text-[11.5px] text-ink-mid transition hover:border-strong hover:text-ink-high"
+            className="w-full rounded-lg border border-line py-1.5 text-meta text-ink-mid transition hover:border-strong hover:text-ink-high"
           >
             清除筛选
           </button>
@@ -294,24 +367,35 @@ export function Sidebar(): JSX.Element {
 
       <div className="app-no-drag space-y-1.5 border-t border-line p-3">
         {/*
-         * 松绿主按钮配象牙字（同 ui.tsx 里 primary 的取舍：紫底书房里
-         * 唯一的实色块留给最重要的动作，字用纸的象牙色）。
+         * 两个入口并成一行：「手动新建条目」是低频动作（大多数论文都是拖一个 PDF 进来），
+         * 退成一个只有图标的次级按钮。两个按钮同高、同一种表面，底部才是一整条而不是两块拼的。
          */}
-        <button
-          onClick={() => openImport()}
-          className="flex w-full items-center justify-center gap-2 rounded-lg bg-gradient-to-b from-[#41856A] to-[#2F644F] py-2 text-[12.5px] font-medium text-[#EDEAE0] shadow-[inset_0_1px_0_rgba(214,242,224,0.22)] transition hover:from-[#4A9175] hover:to-[#38735A]"
-        >
-          <Upload className="h-3.5 w-3.5" />
-          导入 PDF 精读
-        </button>
-        <button
-          onClick={openNewPaper}
-          className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-line py-1.5 text-[11.5px] text-ink-mid transition hover:border-strong hover:text-ink-high"
-        >
-          <Plus className="h-3.5 w-3.5" />
-          手动新建条目
-        </button>
+        <div className="flex items-center gap-1.5">
+          <button
+            onClick={() => openImport()}
+            title="导入 PDF（也可以直接把 PDF 拖进窗口）"
+            className="btn-surface group flex h-8 min-w-0 flex-1 items-center gap-2 rounded-[9px] pl-1.5 pr-2 text-ui font-medium"
+          >
+            <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-[6px] bg-brand/25 text-brand-mist transition group-hover:bg-brand/40">
+              <FileUp className="h-3 w-3" />
+            </span>
+            <span className="truncate tracking-[0.01em]">导入 PDF</span>
+            <kbd className="ml-auto rounded-[5px] border border-white/[0.08] px-1 py-px font-sans text-tiny text-ink-low">
+              ⌘I
+            </kbd>
+          </button>
+          <button
+            onClick={openNewPaper}
+            title="手动新建条目（不从 PDF 导入）"
+            aria-label="手动新建条目"
+            className="btn-surface flex h-8 w-8 shrink-0 items-center justify-center rounded-[9px] text-ink-mid hover:text-ink-high"
+          >
+            <Plus className="h-3.5 w-3.5" />
+          </button>
+        </div>
       </div>
+
+      <AddToCollectionDialog open={createOpen} onClose={() => setCreateOpen(false)} paperIds={[]} />
     </aside>
   )
 }

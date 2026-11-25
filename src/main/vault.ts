@@ -13,14 +13,15 @@ import { normalizeExperimentProfile, profileCompleteness } from '@shared/experim
 import { figureMarkdown, isImagePath, normalizeFigureExtension } from '@shared/figures'
 import { normalizeMethodFlow, type MethodFlow } from '@shared/flow'
 import { normalizeMindMap, type MindMap } from '@shared/mindmap'
-import { normalizeQuiz, type Quiz } from '@shared/quiz'
-import { normalizeLinks, type PaperLink } from '@shared/links'
-import { normalizeSlideDeck, type SlideDeck } from '@shared/slides'
-import { normalizeLearningReview, type LearningReview } from '@shared/learning'
 import { normalizeHighlights } from '@shared/highlights'
 import type { Highlight } from '@shared/highlights'
+import { normalizePhrases, type EnglishPhrase } from '@shared/lenses'
+import { ideaMarkdown, parseIdea, type ResearchIdea } from '@shared/ideas'
+import { DEFAULT_READING_SKILL, READING_SKILL_FILE } from '@shared/reading-skill'
+import { normalizeProblems, problemMapMarkdown, type ProblemMap } from '@shared/problems'
+import { normalizeWritingLogic, type WritingLogic } from '@shared/writing-logic'
 import { paperPreamble, parsePaperBody, renderPaperBody, SECTION_ORDER } from '@shared/template'
-import type { PaperMeta, PaperStatus } from '@shared/types'
+import type { PaperCollection, PaperMeta, PaperStatus } from '@shared/types'
 import { assertGranted } from './file-grants'
 
 export const VAULT_DIRS = {
@@ -30,7 +31,17 @@ export const VAULT_DIRS = {
   papers: 'papers',
   /** 从原文里裁下来的图。跟 papers/ 平级，见 shared/figures.ts 的说明 */
   figures: 'figures',
-  syntheses: 'syntheses'
+  syntheses: 'syntheses',
+  /** 用户手动归到一起的论文组，见 shared/types.ts 的 PaperCollection */
+  collections: 'collections',
+  /** 开放问题池，每个范围一份，见 shared/problems.ts */
+  problems: 'problems',
+  /** 选题本：从开放问题生成、用户长期跟进的选题，见 shared/ideas.ts */
+  ideas: 'ideas',
+  /** 用户可编辑的读论文风格，见 shared/reading-skill.ts */
+  skills: 'skills',
+  /** 从原文抽出的参考文献列表（派生数据，可重新抽取） */
+  refs: '.papervault/refs'
 }
 
 export interface ParsedPaperFile {
@@ -62,6 +73,10 @@ export function newPaperId(title: string): string {
   return `${slugify(title)}-${shortId()}`
 }
 
+export function newCollectionId(title: string): string {
+  return `${slugify(title)}-${shortId()}`
+}
+
 export function ensureVaultStructure(vaultPath: string): void {
   for (const dir of Object.values(VAULT_DIRS)) {
     mkdirSync(join(vaultPath, dir), { recursive: true })
@@ -70,6 +85,24 @@ export function ensureVaultStructure(vaultPath: string): void {
   if (!existsSync(readme)) {
     writeFileSync(readme, VAULT_README, 'utf-8')
   }
+  const skill = join(vaultPath, READING_SKILL_FILE)
+  if (!existsSync(skill)) {
+    writeFileSync(skill, DEFAULT_READING_SKILL, 'utf-8')
+  }
+}
+
+export function readReadingSkill(vaultPath: string): string {
+  const abs = join(vaultPath, READING_SKILL_FILE)
+  try {
+    return existsSync(abs) ? readFileSync(abs, 'utf-8') : DEFAULT_READING_SKILL
+  } catch {
+    return DEFAULT_READING_SKILL
+  }
+}
+
+export function writeReadingSkill(vaultPath: string, content: string): void {
+  ensureVaultStructure(vaultPath)
+  writeFileSync(join(vaultPath, READING_SKILL_FILE), content, 'utf-8')
 }
 
 export const VAULT_README = `# PaperVault 知识库
@@ -78,6 +111,10 @@ export const VAULT_README = `# PaperVault 知识库
 
 - \`papers/\` 每篇论文一个 Markdown 文件，frontmatter 存书目信息，正文是固定章节的精读笔记。
 - \`figures/\` 从原文里裁下来的图（图表、框架图），笔记用相对路径引用，可直接用看图软件浏览。
+- \`collections/\` 专题：用户手动归到一起的论文组，方便指定 agent 专门分析这一块。
+- \`problems/\` 开放问题池：把多篇论文的局限与未来工作聚成的问题清单（全库一份，每个专题一份）。
+- \`skills/读论文风格.md\` 精读 agent 的口吻与导读结构，改它就能改 AI 的写法。
+- \`ideas/\` 选题本：从开放问题生成的选题，每个一份，含假设、最小验证实验、反证条件和你的备注。
 - \`syntheses/\` 跨论文文档：套路归纳、研究想法、组合分析。
 - \`.papervault/\` 索引与附件（PDF 副本、抽取出的原文文本）。
 
@@ -121,6 +158,31 @@ export function listPaperFiles(vaultPath: string): string[] {
   return out
 }
 
+/**
+ * 已下线功能的历史字段：空对象 / 空数组一律当「没有」。
+ *
+ * 这些字段不再有业务含义，只剩下「别把用户磁盘上的数据抹掉」这一个责任。
+ * 但空壳不能反过来污染磁盘：`graph: {}` / `links: []` 写回去既没有信息，
+ * 又会让「有没有这个键」这种判断失去意义（老版本就踩过 `{}` 让保存崩掉）。
+ */
+function legacyField(raw: unknown): unknown {
+  if (raw === undefined || raw === null) return undefined
+  if (Array.isArray(raw)) return raw.length ? raw : undefined
+  if (typeof raw === 'object') {
+    const obj = raw as Record<string, unknown>
+    const keys = Object.keys(obj)
+    if (!keys.length) return undefined
+    /*
+     * `{ entities: [], relations: [] }` 这种「壳还在、内容清空」也要当没有：
+     * 图谱的清空语义一直是「实体为空」，只看键数会把它写成 `graph:` 空结构。
+     */
+    const values = Object.values(obj)
+    if (values.every((v) => Array.isArray(v) && v.length === 0)) return undefined
+    return raw
+  }
+  return raw
+}
+
 function normalizeMeta(raw: Record<string, unknown>, fallbackId: string): PaperMeta {
   const str = (v: unknown): string => (typeof v === 'string' ? v : v == null ? '' : String(v))
   const arr = (v: unknown): string[] =>
@@ -149,10 +211,25 @@ function normalizeMeta(raw: Record<string, unknown>, fallbackId: string): PaperM
     highlights: normalizeHighlights(raw.highlights),
     flow: raw.flow ? normalizeMethodFlow(raw.flow) : undefined,
     mindmap: raw.mindmap ? normalizeMindMap(raw.mindmap) : undefined,
-    quiz: raw.quiz ? normalizeQuiz(raw.quiz) : undefined,
-    slides: raw.slides ? normalizeSlideDeck(raw.slides) : undefined,
-    links: normalizeLinks(raw.links),
-    learningReview: normalizeLearningReview(raw.learningReview),
+    /*
+     * 已下线功能的历史字段，原样透传。
+     *
+     * 不再 normalize —— 解析器已经删了，但**必须原样带回去**：`writePaperFile`
+     * 是白名单重建 frontmatter，不带上就等于在用户保存时把这些数据永久删掉。
+     * 空对象 / 空数组当「没有」，避免把空壳写回磁盘（见 legacyField）。
+     */
+    quiz: legacyField(raw.quiz),
+    slides: legacyField(raw.slides),
+    // 关系是数组：没有这个键时给空数组，下游按「一篇都没连过」处理
+    links: legacyField(raw.links) ?? [],
+    learningReview: legacyField(raw.learningReview),
+    graph: legacyField(raw.graph),
+    /*
+     * 写作逻辑卡同理：它只活在 Markdown 里，索引那一列是镜像。
+     * 少了这一行，一次「重建索引」就会让整个「写作思路」页变成空的。
+     */
+    wlogic: raw.wlogic ? normalizeWritingLogic(raw.wlogic) : undefined,
+    phrases: normalizePhrases(raw.phrases),
     pdf: str(raw.pdf),
     createdAt: str(raw.createdAt) || new Date().toISOString(),
     updatedAt: str(raw.updatedAt) || new Date().toISOString()
@@ -227,7 +304,21 @@ export function readPaperSections(
  */
 function inspectExistingPaper(
   absPath: string
-): { id: string; preamble: string; highlights: Highlight[]; flow?: MethodFlow; mindmap?: MindMap; quiz?: Quiz; slides?: SlideDeck; links: PaperLink[]; learningReview?: LearningReview } | null {
+): {
+  id: string
+  preamble: string
+  highlights: Highlight[]
+  flow?: MethodFlow
+  mindmap?: MindMap
+  /** 已下线功能的历史数据：原样透传，不解析 */
+  quiz?: unknown
+  slides?: unknown
+  links?: unknown
+  learningReview?: unknown
+  graph?: unknown
+  wlogic?: WritingLogic
+  phrases?: EnglishPhrase[]
+} | null {
   try {
     const parsed = matter(readFileSync(absPath, 'utf-8'))
     const data = parsed.data as Record<string, unknown> | undefined
@@ -238,14 +329,56 @@ function inspectExistingPaper(
       highlights: normalizeHighlights(data?.highlights),
       flow: normalizeMethodFlow(data?.flow),
       mindmap: normalizeMindMap(data?.mindmap),
-      quiz: data?.quiz ? normalizeQuiz(data.quiz) : undefined,
-      slides: data?.slides ? normalizeSlideDeck(data.slides) : undefined,
-      links: normalizeLinks(data?.links),
-      learningReview: normalizeLearningReview(data?.learningReview)
+      quiz: legacyField(data?.quiz),
+      slides: legacyField(data?.slides),
+      links: legacyField(data?.links) ?? [],
+      learningReview: legacyField(data?.learningReview),
+      graph: legacyField(data?.graph),
+      wlogic: data?.wlogic ? normalizeWritingLogic(data.wlogic) : undefined,
+      phrases: normalizePhrases(data?.phrases)
     }
   } catch {
     return null
   }
+}
+
+function isPlainObject(value: object): boolean {
+  const proto = Object.getPrototypeOf(value)
+  return proto === Object.prototype || proto === null
+}
+
+/**
+ * 递归丢掉值为 `undefined` 的键（顺带把丢掉的位置记进 `dropped`）。
+ *
+ * 为什么要有这道兜底：frontmatter 是交给 js-yaml **整篇**序列化的，而它遇到
+ * undefined 值直接抛「unacceptable kind of an object to dump [object Undefined]」。
+ * 抛在这一步的代价特别大 —— 精读跑了十几分钟，产出一个字都写不出去，笔记停在
+ * 空骨架，界面上只留一句看不出是哪个字段的报错（`last_run` 里也只有这一句）。
+ *
+ * 这个坑已经踩到第三次了（画像的 `error` → 高亮的 `note` → 图谱的 `aliases` /
+ * `evidence` 与句式库的 `example` / `from`），每次都是「某个可选字段没值时顺手
+ * 写成了 undefined」。所以除了逐个修掉源头，这里再兜一层：宁可少写一个键，
+ * 也不要让一个字段毁掉整篇。丢掉的键会打进主进程日志 —— 它意味着上游有地方
+ * 该用「没有这个键」来表达「没有这个值」。
+ */
+function stripUndefined<T>(value: T, dropped: string[] = [], path = ''): T {
+  if (Array.isArray(value)) {
+    return value.map((item, i) => stripUndefined(item, dropped, `${path}[${i}]`)) as unknown as T
+  }
+  // 只递归普通对象：Date / Map 这类碰了会变形成空对象
+  if (value && typeof value === 'object' && isPlainObject(value)) {
+    const out: Record<string, unknown> = {}
+    for (const [key, item] of Object.entries(value)) {
+      const child = path ? `${path}.${key}` : key
+      if (item === undefined) {
+        dropped.push(child)
+        continue
+      }
+      out[key] = stripUndefined(item, dropped, child)
+    }
+    return out as T
+  }
+  return value
 }
 
 export function writePaperFile(
@@ -280,7 +413,21 @@ export function writePaperFile(
     .map((abs) => ({ abs, info: inspectExistingPaper(abs) }))
     .find((c) => !c.info?.id || c.info.id === finalMeta.id)
 
-  const absPath = target?.abs ?? join(vaultPath, fallbackRel)
+  /*
+   * 索引里记着路径、磁盘上却找不到 → 这份笔记被外部删掉或改名了。
+   * 这时候**不能凭空新建**：那等于把「删除」悄悄撤销；改名的情形还会新造出
+   * `${id}.md`，同一个 id 在库里出现两份笔记（谁覆盖谁取决于遍历顺序）。
+   * 让用户先「重建索引」把索引和磁盘对齐 —— 保存动作不该替用户决定这件事。
+   */
+  if (!target && existingRelPath) {
+    throw new Error(
+      '这篇笔记的文件不在磁盘上了（可能被外部删除或改名）。先执行一次「重建索引」，再保存。'
+    )
+  }
+  // fallback 也要过 resolveInside：id 来自 frontmatter（共享 vault 里可能被改成 `../../x`）
+  const fallbackAbs = resolveInside(vaultPath, fallbackRel)
+  if (!fallbackAbs) throw new Error('笔记路径非法，已拒绝写入。')
+  const absPath = target?.abs ?? fallbackAbs
 
   /*
    * 第一个 `## ` 之前的内容原样带回去。
@@ -340,36 +487,47 @@ export function writePaperFile(
   if (mindmap) {
     frontmatter.mindmap = mindmap
   }
-  const quiz = finalMeta.quiz ?? target?.info?.quiz
-  if (quiz) {
-    frontmatter.quiz = quiz
+  const phrases = finalMeta.phrases ?? target?.info?.phrases
+  if (phrases?.length) {
+    frontmatter.phrases = phrases
   }
   /*
-   * 演示稿同理：索引里没有这一列，普通保存（改评分 / 改分类）构造出的 meta
-   * 不带它 —— 少了「meta 没给就沿用磁盘上的」，顺手保存一次就把整份演示删了。
-   */
-  const slides = finalMeta.slides ?? target?.info?.slides
-  if (slides) {
-    frontmatter.slides = slides
-  }
-  /*
-   * 关系同理（索引里那一列只是给构图用的镜像，Markdown 仍是唯一事实来源）。
+   * 写作逻辑卡与图谱同一类问题：只存在 Markdown 里，而「改评分」「批量加标签」
+   * 这些路径构造出来的 meta 不带它。少了「meta 没给就沿用磁盘上的」这一句，
+   * 顺手保存一次就会把整张卡抹掉 —— 而它没法从正文重新长出来。
    *
-   * 两处和别的字段不一样：
-   *   - 显式传空数组时要**把键删掉**，否则「取消最后一条关系」永远存不下去
-   *     （沿用磁盘旧值 → 下次读回来又出现了）；
-   *   - 要把规整后的结果写回 finalMeta —— persistPaper 紧接着会拿它整行 upsert，
-   *     索引列才不会和磁盘漂移。
+   * 要把规整后的结果写回 finalMeta：紧接着的 upsert 会拿它进索引列，
+   * 不写回的话索引和磁盘会在下一次保存时漂移。
    */
-  const links = normalizeLinks(finalMeta.links ?? target?.info?.links ?? [], finalMeta.id)
-  if (links.length) frontmatter.links = links
-  else delete frontmatter.links
-  finalMeta.links = links
-  const learningReview = normalizeLearningReview(finalMeta.learningReview ?? target?.info?.learningReview)
-  if (learningReview) frontmatter.learningReview = learningReview
-  finalMeta.learningReview = learningReview
+  const wlogic = finalMeta.wlogic ?? target?.info?.wlogic
+  if (wlogic?.storyline?.oneliner) {
+    frontmatter.wlogic = wlogic
+  }
+  finalMeta.wlogic = wlogic
+  /*
+   * 已下线功能的字段：quiz / slides / links / learningReview / graph。
+   *
+   * 只做「meta 没给就沿用磁盘旧值」的透传，不解析、不规整、不参与业务判断。
+   * 保留的唯一理由是**不能让老数据在用户保存时消失** —— 这几个键在磁盘上可能存着
+   * 之前花 token 生成的题目、讲稿和关系，删了应用内也再没有入口能恢复。
+   * 用户想清理就自己用 Obsidian 删键。
+   */
+  for (const key of ['quiz', 'slides', 'links', 'learningReview', 'graph'] as const) {
+    const value = legacyField(finalMeta[key] ?? target?.info?.[key])
+    // frontmatter 是从空白对象逐键重建的：不写这一行，等价于把磁盘上的键删掉。
+    // 空壳不写则保证「显式清空」真的会删键，而不是留一个 {} / []。
+    if (value !== undefined) {
+      frontmatter[key] = value
+    }
+  }
 
-  writeFileSync(absPath, matter.stringify(body, frontmatter), 'utf-8')
+  // 写盘前兜一层：万一还有哪个字段是 undefined，也只丢那一个键，不整篇失败
+  const dropped: string[] = []
+  const serializable = stripUndefined(frontmatter, dropped)
+  if (dropped.length) {
+    console.warn(`[vault] frontmatter 里有值为 undefined 的键，已跳过：${dropped.join('、')}`)
+  }
+  writeFileSync(absPath, matter.stringify(body, serializable), 'utf-8')
 
   return {
     meta: finalMeta,
@@ -397,8 +555,13 @@ export function saveExtractedText(vaultPath: string, id: string, text: string): 
 }
 
 export function readExtractedText(vaultPath: string, id: string): string {
-  const abs = join(vaultPath, VAULT_DIRS.texts, `${id}.txt`)
-  if (!existsSync(abs)) return ''
+  /*
+   * 必须过 resolveInside：id 是渲染层传下来的（`papers:text` 原样透传），
+   * 不收敛就往 `texts/` 里拼的话，`../../../某处/secret` 这样的 id 能读到
+   * 知识库之外的 .txt 文件。这是全项目唯一漏掉这道校验的读入口。
+   */
+  const abs = resolveInside(vaultPath, join(VAULT_DIRS.texts, `${id}.txt`))
+  if (!abs || !existsSync(abs)) return ''
   try {
     return readFileSync(abs, 'utf-8')
   } catch {
@@ -554,6 +717,268 @@ export function figureMarkdownFor(noteRelPath: string, figureRelPath: string): s
   return figureMarkdown(rel)
 }
 
+/* ------------------------------------------------------------------ */
+/*  专题文件                                                            */
+/* ------------------------------------------------------------------ */
+
+function walkMarkdownFiles(root: string): string[] {
+  if (!existsSync(root)) return []
+  const out: string[] = []
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.name.startsWith('.')) continue
+      const abs = join(dir, entry.name)
+      if (entry.isDirectory()) walk(abs)
+      else if (entry.isFile() && extname(entry.name).toLowerCase() === '.md') out.push(abs)
+    }
+  }
+  walk(root)
+  return out
+}
+
+export function listCollectionFiles(vaultPath: string): string[] {
+  return walkMarkdownFiles(join(vaultPath, VAULT_DIRS.collections))
+}
+
+function uniqueIds(ids: unknown): string[] {
+  if (!Array.isArray(ids)) return []
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const raw of ids) {
+    const id = String(raw ?? '').trim()
+    if (!id || seen.has(id)) continue
+    seen.add(id)
+    out.push(id)
+  }
+  return out
+}
+
+export function readCollectionFile(absPath: string, vaultPath: string): PaperCollection | null {
+  try {
+    const raw = readFileSync(absPath, 'utf-8')
+    const parsed = matter(raw)
+    const data = parsed.data as Record<string, unknown>
+    const id = typeof data.id === 'string' ? data.id.trim() : ''
+    if (!id) return null
+    const createdAt =
+      typeof data.createdAt === 'string' && data.createdAt ? data.createdAt : new Date().toISOString()
+    const updatedAt =
+      typeof data.updatedAt === 'string' && data.updatedAt ? data.updatedAt : createdAt
+    return {
+      id,
+      title: typeof data.title === 'string' && data.title.trim() ? data.title.trim() : '未命名专题',
+      description: typeof data.description === 'string' ? data.description : '',
+      paperIds: uniqueIds(data.paperIds),
+      notes: (parsed.content ?? '').replace(/^\n+/, ''),
+      relPath: vaultRelative(vaultPath, absPath),
+      createdAt,
+      updatedAt
+    }
+  } catch {
+    return null
+  }
+}
+
+export function writeCollectionFile(
+  vaultPath: string,
+  collection: PaperCollection,
+  existingRelPath?: string
+): PaperCollection {
+  ensureVaultStructure(vaultPath)
+  const now = new Date().toISOString()
+  const next: PaperCollection = {
+    ...collection,
+    title: collection.title.trim() || '未命名专题',
+    description: collection.description.trim(),
+    paperIds: uniqueIds(collection.paperIds),
+    notes: collection.notes ?? '',
+    updatedAt: now,
+    createdAt: collection.createdAt || now
+  }
+
+  const fallbackRel = join(VAULT_DIRS.collections, `${next.id}.md`)
+  const fallbackAbs = resolveInside(vaultPath, fallbackRel)
+  if (!fallbackAbs) throw new Error('专题路径非法，已拒绝写入。')
+
+  let absPath = fallbackAbs
+  if (existingRelPath) {
+    const existingAbs = resolveInside(vaultPath, existingRelPath)
+    if (!existingAbs || !existsSync(existingAbs)) {
+      throw new Error(
+        '这份专题的文件不在磁盘上了（可能被外部删除或改名）。先执行一次「重建索引」，再保存。'
+      )
+    }
+    absPath = existingAbs
+  }
+
+  const frontmatter: Record<string, unknown> = {
+    id: next.id,
+    title: next.title,
+    description: next.description,
+    paperIds: next.paperIds,
+    createdAt: next.createdAt,
+    updatedAt: next.updatedAt
+  }
+  writeFileSync(absPath, matter.stringify(next.notes.replace(/\n+$/, '') + '\n', frontmatter), 'utf-8')
+  next.relPath = vaultRelative(vaultPath, absPath)
+  return next
+}
+
+export function deleteCollectionFile(vaultPath: string, relPath: string): boolean {
+  const abs = resolveInside(vaultPath, relPath)
+  if (!abs || !existsSync(abs)) return false
+  /*
+   * 只允许删 collections/ 里的文件：relPath 来自索引，而索引最初来自磁盘上的
+   * frontmatter，同样不可全信。
+   */
+  const allowed = resolveInside(vaultPath, VAULT_DIRS.collections)
+  if (!allowed || abs === allowed || !abs.startsWith(allowed + sep)) return false
+  rmSync(abs, { force: true })
+  return true
+}
+
+/* ------------------------------------------------------------------ */
+/*  开放问题池                                                          */
+/* ------------------------------------------------------------------ */
+
+function problemFilePath(vaultPath: string, scope: string): string {
+  const safe = scope.replace(/[\\/]/g, '_')
+  const abs = resolveInside(vaultPath, join(VAULT_DIRS.problems, `${safe}.md`))
+  if (!abs) throw new Error('问题池路径非法，已拒绝。')
+  return abs
+}
+
+export function readProblemFile(vaultPath: string, scope: string): ProblemMap | null {
+  const abs = problemFilePath(vaultPath, scope)
+  if (!existsSync(abs)) return null
+  try {
+    const data = matter(readFileSync(abs, 'utf-8')).data as Record<string, unknown>
+    const paperIds = uniqueIds(data.paperIds)
+    const known = new Set(paperIds)
+    return {
+      scope,
+      scopeTitle: typeof data.scopeTitle === 'string' ? data.scopeTitle : scope,
+      generatedAt: typeof data.generatedAt === 'string' ? data.generatedAt : '',
+      paperIds,
+      summary: typeof data.summary === 'string' ? data.summary : '',
+      problems: normalizeProblems(data.problems, (id) => (known.has(id) ? id : null))
+    }
+  } catch {
+    return null
+  }
+}
+
+export function writeProblemFile(
+  vaultPath: string,
+  map: ProblemMap,
+  titleOf: (id: string) => string
+): void {
+  ensureVaultStructure(vaultPath)
+  const frontmatter: Record<string, unknown> = {
+    scope: map.scope,
+    scopeTitle: map.scopeTitle,
+    generatedAt: map.generatedAt,
+    paperIds: map.paperIds,
+    summary: map.summary,
+    problems: map.problems.map((p) => ({ ...p }))
+  }
+  writeFileSync(
+    problemFilePath(vaultPath, map.scope),
+    matter.stringify(problemMapMarkdown(map, titleOf), frontmatter),
+    'utf-8'
+  )
+}
+
+/* ------------------------------------------------------------------ */
+/*  选题本                                                              */
+/* ------------------------------------------------------------------ */
+
+export function newIdeaId(title: string): string {
+  return `${slugify(title)}-${shortId()}`
+}
+
+function ideaFilePath(vaultPath: string, id: string): string {
+  const abs = resolveInside(
+    vaultPath,
+    join(VAULT_DIRS.ideas, `${id.replace(/[\\/]/g, '_')}.md`)
+  )
+  if (!abs) throw new Error('选题路径非法，已拒绝。')
+  return abs
+}
+
+export function readIdeaFile(vaultPath: string, id: string): ResearchIdea | null {
+  const abs = ideaFilePath(vaultPath, id)
+  if (!existsSync(abs)) return null
+  try {
+    return parseIdea(id, matter(readFileSync(abs, 'utf-8')).data as Record<string, unknown>)
+  } catch {
+    return null
+  }
+}
+
+export function listIdeaFiles(vaultPath: string): ResearchIdea[] {
+  const dir = join(vaultPath, VAULT_DIRS.ideas)
+  if (!existsSync(dir)) return []
+  const out: ResearchIdea[] = []
+  for (const name of readdirSync(dir)) {
+    if (!name.endsWith('.md')) continue
+    const idea = readIdeaFile(vaultPath, name.slice(0, -3))
+    if (idea) out.push(idea)
+  }
+  return out
+}
+
+export function writeIdeaFile(
+  vaultPath: string,
+  idea: ResearchIdea,
+  titleOf: (id: string) => string
+): void {
+  ensureVaultStructure(vaultPath)
+  const frontmatter: Record<string, unknown> = { ...idea }
+  delete frontmatter.id
+  if (!frontmatter.problemId) delete frontmatter.problemId
+  writeFileSync(
+    ideaFilePath(vaultPath, idea.id),
+    matter.stringify(ideaMarkdown(idea, titleOf), frontmatter),
+    'utf-8'
+  )
+}
+
+export function deleteIdeaFile(vaultPath: string, id: string): boolean {
+  const abs = ideaFilePath(vaultPath, id)
+  if (!existsSync(abs)) return false
+  rmSync(abs, { force: true })
+  return true
+}
+
+/* ------------------------------------------------------------------ */
+/*  参考文献缓存（派生数据，放在 .papervault/ 下）                      */
+/* ------------------------------------------------------------------ */
+
+function refsFilePath(vaultPath: string, paperId: string): string {
+  const abs = resolveInside(
+    vaultPath,
+    join(VAULT_DIRS.refs, `${paperId.replace(/[\\/]/g, '_')}.json`)
+  )
+  if (!abs) throw new Error('参考文献缓存路径非法，已拒绝。')
+  return abs
+}
+
+export function readRefsFile(vaultPath: string, paperId: string): unknown {
+  const abs = refsFilePath(vaultPath, paperId)
+  if (!existsSync(abs)) return null
+  try {
+    return JSON.parse(readFileSync(abs, 'utf-8'))
+  } catch {
+    return null
+  }
+}
+
+export function writeRefsFile(vaultPath: string, paperId: string, data: unknown): void {
+  ensureVaultStructure(vaultPath)
+  writeFileSync(refsFilePath(vaultPath, paperId), JSON.stringify(data, null, 2), 'utf-8')
+}
+
 /** 生成用于新建论文的空白章节 */
 export function blankPaperMeta(partial: Partial<PaperMeta> = {}): PaperMeta {
   const now = new Date().toISOString()
@@ -577,10 +1002,6 @@ export function blankPaperMeta(partial: Partial<PaperMeta> = {}): PaperMeta {
     createdAt: partial.createdAt ?? now,
     updatedAt: partial.updatedAt ?? now
   }
-}
-
-export function synthesisRelPath(vaultPath: string, id: string): string {
-  return vaultRelative(vaultPath, join(vaultPath, VAULT_DIRS.syntheses, `${id}.md`))
 }
 
 export { SECTION_ORDER }

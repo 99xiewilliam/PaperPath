@@ -1,12 +1,9 @@
 import type { ExperimentProfile } from './experiment'
 import type { MethodFlow } from './flow'
 import type { MindMap } from './mindmap'
-import type { Quiz } from './quiz'
-import type { SlideDeck } from './slides'
-import type { PaperLink } from './links'
-import type { LearningReview } from './learning'
 import type { Highlight } from './highlights'
-import type { EnglishPhrase, LensId, LensRunRecord, PaperGraph } from './lenses'
+import type { EnglishPhrase, LensId, LensRunRecord } from './lenses'
+import type { WritingLogic } from './writing-logic'
 
 /** 论文阅读状态 */
 export type PaperStatus = 'inbox' | 'reading' | 'read' | 'archived'
@@ -49,23 +46,34 @@ export interface PaperMeta {
   highlights?: Highlight[]
   /** 结构化英语短语，由 english 维度抽取，见 shared/lenses.ts */
   phrases?: EnglishPhrase[]
-  /** 实体与关系，由 graph 维度抽取，用于跨论文建图 */
-  graph?: PaperGraph
+  /*
+   * 以下是**已下线功能**留下的历史字段：知识图谱、考考我、演示、论文关系、复习安排。
+   *
+   * 类型一律用 `unknown` 而不是各自的接口 —— 功能删了，但**磁盘上已有的数据不能丢**。
+   * `writePaperFile` 是白名单式重建 frontmatter，少一条透传就会在用户改个评分时
+   * 把整段数据永久抹掉（quiz / slides 还是花 token 生成的）。
+   * 想看内容用外部编辑器打开 Markdown；应用内不再解析、不再展示。
+   */
+  graph?: unknown
+  /**
+   * 写作逻辑卡，由 writingLogic 维度抽取，见 shared/writing-logic.ts。
+   *
+   * 这是「写作思路」页的唯一数据来源：单篇卡直接渲染它，套路库按它的字段聚类。
+   * 它只落在 frontmatter 里（索引那一列是它的镜像，可以从 Markdown 重建）。
+   */
+  wlogic?: WritingLogic
   /** 方法流程图，由「方法细节与例子」维度顺带产出，见 shared/flow.ts */
   flow?: MethodFlow
   /** 全文思维导图，由「速览与故事线」维度顺带产出，见 shared/mindmap.ts */
   mindmap?: MindMap
-  /** 「考考我」自测题，由阅读页按需生成，见 shared/quiz.ts */
-  quiz?: Quiz
-  /** 演示文稿（讲给没读过的人听），由详情页按需生成，见 shared/slides.ts */
-  slides?: SlideDeck
-  /**
-   * 与库里其他论文的关系（手工建立，或采纳 AI 提议），见 shared/links.ts。
-   * 只存**出边**，反方向在界面上现算 —— 一条关系存两份迟早会漂移。
-   */
-  links?: PaperLink[]
-  /** 手动回顾后的复习安排，随 Markdown 知识库保存。 */
-  learningReview?: LearningReview
+  /** 已下线：「考考我」自测题，历史数据原样透传 */
+  quiz?: unknown
+  /** 已下线：「演示」讲稿，历史数据原样透传 */
+  slides?: unknown
+  /** 已下线：论文关系，历史数据原样透传 */
+  links?: unknown
+  /** 已下线：复习安排，历史数据原样透传 */
+  learningReview?: unknown
   /** 相对 vault 根目录的 PDF 路径，空串表示无附件 */
   pdf: string
   createdAt: string
@@ -74,7 +82,6 @@ export interface PaperMeta {
 
 /** 列表页使用的轻量视图 */
 export interface PaperSummary {
-  learningReview?: LearningReview
   id: string
   title: string
   authors: string[]
@@ -89,10 +96,6 @@ export interface PaperSummary {
   exp?: ExperimentProfile
   /** 结构化英语短语 */
   phrases?: EnglishPhrase[]
-  /** 实体与关系（知识图谱） */
-  graph?: PaperGraph
-  /** 与库里其他论文的关系；列表页也带上，详情页靠它现算「谁指向我」 */
-  links?: PaperLink[]
   /** 从正文「一句话总结」章节抽取 */
   tldr: string
   updatedAt: string
@@ -141,6 +144,40 @@ export interface PaperBulkUpdate {
   removeTags?: string[]
 }
 
+/**
+ * 专题：用户手动把一组相关论文归到一起。
+ *
+ * 和分类 / 标签不是一回事 —— 那些是给论文打的属性；专题是一个有名字的集合，
+ * 对应「我这段时间集中看的那几篇」，方便之后指定 agent 专门分析这一块。
+ * Markdown 是唯一事实来源（`collections/<id>.md`），索引只是派生。
+ */
+export interface PaperCollection {
+  id: string
+  title: string
+  description: string
+  paperIds: string[]
+  /** 专题自己的笔记（分析结论、待办），不是某篇论文的章节 */
+  notes: string
+  relPath: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface CollectionCreateInput {
+  title: string
+  description?: string
+  paperIds?: string[]
+  notes?: string
+}
+
+export interface CollectionUpdateInput {
+  id: string
+  title?: string
+  description?: string
+  paperIds?: string[]
+  notes?: string
+}
+
 /** 新建论文时的载荷 */
 export interface PaperCreateInput {
   title: string
@@ -177,42 +214,18 @@ export interface ImportPdfResult {
   message?: string
 }
 
-/** 跨论文的 AI 文档：套路归纳，或从已确认的论文关系组合出的研究想法 */
-export interface Synthesis {
-  id: string
-  title: string
-  /** 归纳范围：按分类 / 按标签 / 手动挑选 */
-  scope: SynthesisScope
-  content: string
-  relPath: string
-  createdAt: string
-  updatedAt: string
-  paperCount: number
-}
-
-export interface SynthesisScope {
-  /**
-   * 这份文档是怎么选出来的：
-   *   - category / tag / papers：套路归纳的三种范围；
-   *   - links：从**你确认过的**论文关系组合出的研究想法（见 shared/ideas.ts）；
-   *   - combo：对一组自己挑的论文做组合分析（见 shared/combo.ts）。
-   */
-  type: 'category' | 'tag' | 'papers' | 'links' | 'combo'
-  value: string
-  /** type=papers 时生效 */
-  paperIds?: string[]
-}
-
-export interface SynthesisScopeInput {
-  type: 'category' | 'tag' | 'papers'
-  value: string
-  paperIds?: string[]
-  /** 归纳聚焦的维度，留空表示全维度 */
-  focus?: string[]
-}
-
 /** 应用设置 */
 export interface AppSettings {
+  /**
+   * 设置结构的版本号，用于**一次性**迁移（见 main/settings.ts 的 migrateSettings）。
+   *
+   * 为什么需要它：有些默认值改了之后必须对老用户生效一次（例如某个分析维度
+   * 从默认开启改为默认关闭），但用户手动改回来之后又不能每次启动都被重置。
+   * 靠「每次启动补一遍」是错的，只能靠版本号判断「这条迁移跑过没有」。
+   *
+   * 缺省视为 1（引入这个字段之前的配置）。
+   */
+  settingsVersion?: number
   vaultPath: string
   llm: LlmSettings
   /** 是否在导入 PDF 后自动调用 LLM 生成结构化笔记 */
@@ -254,6 +267,14 @@ export interface LlmSettings {
   temperature: number
   maxTokens: number
   /**
+   * 单价（元 / 百万 token），只用来把用量换算成花费，不参与任何请求。
+   *
+   * 为什么不给个默认值：不同服务商差几倍，写死必然误导。留空时界面只显示 token
+   * 数、不显示金额 —— 宁可少显示，也不要显示一个错的数字。
+   */
+  priceInput?: number
+  priceOutput?: number
+  /**
    * 服务商特有的额外请求参数，原样并进 chat/completions 的 body。
    *
    * 为什么需要它：各家的「开关」都不在 OpenAI 兼容协议里 —— 智谱要
@@ -264,7 +285,17 @@ export interface LlmSettings {
    * 由 `PAPERVAULT_LLM_EXTRA_BODY` 提供（JSON 对象），只从环境变量读取。
    */
   extraBody?: Record<string, unknown>
+  /**
+   * 接口协议，决定请求由哪个适配器发出（见 main/llm/providers.ts）。
+   * 缺省即 OpenAI 兼容 —— 智谱、DeepSeek、通义和各类中转都走它，老配置不用改。
+   * 由 `PAPERVAULT_LLM_PROVIDER` 覆盖。
+   */
+  provider?: LlmProviderId
 }
+
+/** 已实现的接口协议。接 Anthropic / Gemini 原生接口时在这里加一项，再写一个适配器 */
+export const LLM_PROVIDER_IDS = ['openai-compatible'] as const
+export type LlmProviderId = (typeof LLM_PROVIDER_IDS)[number]
 
 /** 分类体系节点 */
 export interface TaxonomyNode {
@@ -301,7 +332,6 @@ export interface VaultStatus {
   opened: boolean
   path: string
   paperCount: number
-  synthesisCount: number
 }
 
 export interface ScanResult {
@@ -315,25 +345,6 @@ export interface AiTaskResult {
   ok: boolean
   message: string
   paperId?: string
-  synthesisId?: string
-}
-
-/**
- * 「AI 找关系」的结果。
- *
- * 带回落盘后的**完整** links（而不只是新增的那几条）：渲染层直接拿它覆盖 draft 就行，
- * 不用自己拼一遍 —— 拼接逻辑分散在两边迟早漂移，而 `normalizeLinks` 已经在主进程
- * 做过去重、限长、人手工优先，那才是权威版本。
- */
-export interface LinkDiscoveryResult {
-  ok: boolean
-  message: string
-  /** 这篇论文落盘后的完整关系列表 */
-  links?: PaperLink[]
-  /** 实际判断了多少对候选 */
-  judged?: number
-  /** 其中判定成立、写成提议的条数 */
-  proposed?: number
 }
 
 /** 从 PDF 抽取的原始文本 + 启发式切分的章节 */

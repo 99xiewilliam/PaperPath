@@ -14,7 +14,7 @@
   }
 
   body {
-    @apply bg-bg-base text-ink-high font-sans text-[13.5px] leading-[1.65];
+    @apply bg-bg-base text-ink-high font-sans text-body leading-[1.65];
     overflow: hidden;
     user-select: none;
   }
@@ -71,7 +71,7 @@
    */
   select {
     @apply cursor-pointer appearance-none;
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6' fill='none'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23ABA69B' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6' fill='none'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23B3AEA4' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
     background-repeat: no-repeat;
     background-position: right 4px center;
   }
@@ -144,7 +144,7 @@
   }
 
   .field {
-    @apply w-full rounded-lg border border-line bg-bg-base px-3 py-2 text-[13px] text-ink-high
+    @apply w-full rounded-lg border border-line bg-bg-base px-3 py-2 text-body text-ink-high
       outline-none transition placeholder:text-ink-low focus:border-brand/60 focus:ring-2 focus:ring-brand/20;
   }
 
@@ -154,8 +154,32 @@
    * 内边距同步收紧一档，让密集的分类 / 标签区不再鼓胀。
    */
   .chip {
-    @apply inline-flex items-center gap-1 rounded-[5px] border border-line px-1.5 py-[2px]
-      text-[11px] font-medium leading-none;
+    @apply inline-flex items-center gap-1 rounded-[5px] border border-line px-1.5 py-[3px]
+      text-caption font-medium leading-none;
+  }
+
+  /* 主按钮的松绿渐变：只在这里定义一次，Button primary 和其它大号主操作共用 */
+  .btn-primary {
+    @apply bg-gradient-to-b from-[#41856A] to-[#2F644F] text-ink-high
+      hover:from-[#4A9175] hover:to-brand;
+    box-shadow:
+      inset 0 1px 0 rgba(214, 242, 224, 0.22),
+      0 1px 2px rgba(0, 0, 0, 0.45);
+  }
+
+  /*
+   * 侧栏里的常驻动作：深色表面 + 细边 + 顶部一线高光，品牌色只落在图标上。
+   * 常驻按钮天天看见，用实色块会把整条侧栏的重心拽到底部；
+   * 悬停时边框才泛出松绿，表示「它是可按的」而不是一直喊着。
+   */
+  .btn-surface {
+    @apply border border-white/[0.09] bg-gradient-to-b from-bg-overlay to-bg-raised text-ink-high
+      transition-[border-color,background-color,transform] duration-150
+      hover:border-brand/45 hover:from-bg-hover hover:to-bg-overlay
+      active:translate-y-px;
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.06),
+      0 1px 2px rgba(0, 0, 0, 0.5);
   }
 }
 
@@ -167,7 +191,7 @@
  * 等宽，和正文形成「手稿 vs 打字机」的对照。
  */
 .md-body {
-  @apply font-serif text-[14px] leading-[1.85] text-ink-high;
+  @apply font-serif text-[14.5px] leading-[1.85] text-ink-high;
 }
 
 .md-body h1,
@@ -187,7 +211,7 @@
   @apply text-[14.5px];
 }
 .md-body h4 {
-  @apply text-[13.5px] text-ink-mid;
+  @apply text-body text-ink-mid;
 }
 
 .md-body p {
@@ -221,7 +245,7 @@
 }
 
 .md-body code {
-  @apply rounded bg-white/[0.07] px-1.5 py-0.5 font-mono text-[12px] text-accent-soft;
+  @apply rounded bg-white/[0.07] px-1.5 py-0.5 font-mono text-ui text-accent-soft;
 }
 
 .md-body pre {
@@ -229,7 +253,7 @@
 }
 
 .md-body pre code {
-  @apply bg-transparent p-0 text-[12px] text-ink-high;
+  @apply bg-transparent p-0 text-ui text-ink-high;
 }
 
 .md-body blockquote {
@@ -237,7 +261,7 @@
 }
 
 .md-body table {
-  @apply my-3 w-full border-collapse overflow-hidden rounded-lg text-[12.5px];
+  @apply my-3 w-full border-collapse overflow-hidden rounded-lg text-ui;
 }
 
 .md-body th,
