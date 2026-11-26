@@ -71,6 +71,14 @@ function isTransientStatus(status?: number): boolean {
   return status === 408 || status === 429 || (status != null && status >= 500)
 }
 
+/** 连接被掐、等响应头超时：没有 HTTP 状态码，但再试一次经常能过 */
+function isTransientNetwork(err: LlmError): boolean {
+  if (err.cancelled || err.status != null) return false
+  return /网络请求失败|fetch failed|ECONNRESET|ETIMEDOUT|UND_ERR_|HeadersTimeout|BodyTimeout/i.test(
+    err.message
+  )
+}
+
 const RETRY_BACKOFF_MS = [1000, 3000]
 
 /** 可中断的等待：用户点了取消就不该继续等下去，更不该接着重试 */
@@ -226,9 +234,11 @@ export async function chatCompletion(
         done = await attempt(false)
         return done
       }
-      if (!(err instanceof LlmError) || !isTransientStatus(err.status)) throw err
+      if (!(err instanceof LlmError) || !(isTransientStatus(err.status) || isTransientNetwork(err))) {
+        throw err
+      }
 
-      // 限流 / 网关 5xx：退避重试，每次重试前重新看一眼取消信号
+      // 限流 / 网关 5xx / 瞬时断连：退避重试，每次重试前重新看一眼取消信号
       let last: LlmError = err
       for (const waitMs of RETRY_BACKOFF_MS) {
         await sleep(waitMs, signal)
@@ -239,7 +249,12 @@ export async function chatCompletion(
         } catch (retryErr) {
           if (retryErr instanceof LlmError && retryErr.cancelled) throw retryErr
           // 这次错的和上次不是一回事（比如换成了 401），重试下去没意义
-          if (!(retryErr instanceof LlmError) || !isTransientStatus(retryErr.status)) throw retryErr
+          if (
+            !(retryErr instanceof LlmError) ||
+            !(isTransientStatus(retryErr.status) || isTransientNetwork(retryErr))
+          ) {
+            throw retryErr
+          }
           last = retryErr
         }
       }

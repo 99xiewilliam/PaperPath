@@ -4,6 +4,7 @@
  * 智谱、DeepSeek、通义、各类中转都走它。服务商特有的开关
  * （智谱的 `thinking`、通义的 `enable_thinking` …）由 settings.extraBody 原样并进请求体。
  */
+import { createRequire } from 'node:module'
 import {
   EMPTY_CONTENT_HINT,
   LlmError,
@@ -12,6 +13,50 @@ import {
   type LlmToolCall,
   type ProviderRequest
 } from './types'
+
+/**
+ * App 里走 Chromium 的 `net.fetch`，不要用 Node 全局 fetch。
+ *
+ * Node/undici 默认 `headersTimeout` 是 300 秒：推理模型思考超过 5 分钟
+ * 还没吐响应头时，AbortController 还没到点，fetch 已经抛 `fetch failed`。
+ * Chromium 没有这层限制，真正等多久由下面的 AbortController 说了算，
+ * 也更肯走系统代理。
+ *
+ * 冒烟脚本不在 Electron 里跑，退回全局 fetch。
+ */
+let cachedFetch: typeof fetch | undefined
+
+function runtimeFetch(): typeof fetch {
+  if (cachedFetch) return cachedFetch
+  if (process.versions.electron) {
+    try {
+      const electron = createRequire(import.meta.url)('electron') as {
+        net?: { fetch?: typeof fetch }
+      }
+      if (typeof electron.net?.fetch === 'function') {
+        cachedFetch = electron.net.fetch.bind(electron.net)
+        return cachedFetch
+      }
+    } catch {
+      /* 测试脚本把 electron 换成了 stub */
+    }
+  }
+  cachedFetch = globalThis.fetch
+  return cachedFetch
+}
+
+/** undici 把 HeadersTimeoutError 挂在 `cause` 上，外层只有一句 fetch failed */
+function describeNetworkError(err: unknown): string {
+  if (!(err instanceof Error)) return String(err)
+  const parts = [err.message]
+  let cause: unknown = (err as Error & { cause?: unknown }).cause
+  for (let i = 0; i < 3 && cause instanceof Error; i++) {
+    if (cause.message && cause.message !== err.message) parts.push(cause.message)
+    else if (cause.name && cause.name !== 'Error') parts.push(cause.name)
+    cause = (cause as Error & { cause?: unknown }).cause
+  }
+  return parts.join(' · ')
+}
 
 function endpointOf(baseUrl: string): string {
   const b = (baseUrl || '').trim().replace(/\/+$/, '')
@@ -59,7 +104,7 @@ async function requestStream(
   external?.addEventListener('abort', onAbort, { once: true })
 
   try {
-    const res = await fetch(url, {
+    const res = await runtimeFetch()(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -183,7 +228,7 @@ async function requestStream(
         `请求超时（${Math.round(timeoutMs / 1000)} 秒），可以换用更快的模型或缩短输入。`
       )
     }
-    throw new LlmError(`网络请求失败：${(err as Error).message}`)
+    throw new LlmError(`网络请求失败：${describeNetworkError(err)}`)
   } finally {
     clearTimeout(timer)
     external?.removeEventListener('abort', onAbort)
@@ -205,7 +250,7 @@ async function request(
   external?.addEventListener('abort', onAbort, { once: true })
 
   try {
-    const res = await fetch(url, {
+    const res = await runtimeFetch()(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -257,7 +302,7 @@ async function request(
         `请求超时（${Math.round(timeoutMs / 1000)} 秒），可以换用更快的模型或缩短输入。`
       )
     }
-    throw new LlmError(`网络请求失败：${(err as Error).message}`)
+    throw new LlmError(`网络请求失败：${describeNetworkError(err)}`)
   } finally {
     clearTimeout(timer)
     external?.removeEventListener('abort', onAbort)

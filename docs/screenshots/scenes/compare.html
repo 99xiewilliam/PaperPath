@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>PaperVault — 实验对比</title>
+    <link rel="stylesheet" href="_shared.css" />
+  </head>
+  <body>
+    <div class="app">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="monogram">PV</div>
+          <div>
+            <h1>PaperVault</h1>
+            <small>论文智库</small>
+          </div>
+        </div>
+        <div class="nav-btn">◇ 论文库</div>
+        <div class="nav-btn">◇ 写作思路</div>
+        <div class="nav-btn active">◆ 实验对比</div>
+        <div class="nav-btn">◇ 沉淀</div>
+      </aside>
+      <div class="full-main">
+        <div class="section-title">实验对比</div>
+        <div class="section-desc">同类论文实验设置一览 · 可排序 · 导出 CSV / Markdown</div>
+        <div class="card" style="margin-bottom: 14px">
+          <p style="color: #8a857b; font-size: 12px">
+            本批 8 篇 · 平均 <strong style="color: #abd3bc">3.2</strong> 个数据集 ·
+            <strong style="color: #abd3bc">62%</strong> 报告方差 · 开源模型占比
+            <strong style="color: #abd3bc">75%</strong>
+          </p>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>论文</th>
+                <th>数据集</th>
+                <th>基线</th>
+                <th>指标</th>
+                <th>方差</th>
+                <th>算力</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Lost in the Middle</td>
+                <td>合成 QA ×2</td>
+                <td>GPT-3.5/4</td>
+                <td>Accuracy</td>
+                <td>—</td>
+                <td>API</td>
+              </tr>
+              <tr>
+                <td>RAPTOR</td>
+                <td>NarrativeQA</td>
+                <td>BM25, DPR</td>
+                <td>F1 / EM</td>
+                <td>否</td>
+                <td>A100×8</td>
+              </tr>
+              <tr>
+                <td>Self-RAG</td>
+                <td>PopQA, ARC</td>
+                <td>检索 LLM</td>
+                <td>Acc / F1</td>
+                <td>是</td>
+                <td>开源 7B</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <span class="btn-primary" style="margin-top: 14px; display: inline-block">导出 Markdown</span>
+      </div>
+    </div>
+    <div class="caption">界面示意 · 实验对比表</div>
+  </body>
+</html>

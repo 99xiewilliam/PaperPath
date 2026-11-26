@@ -52,9 +52,14 @@ export const LLM_PRESETS = [
     model: 'qwen-plus'
   },
   {
-    label: '智谱 GLM',
+    label: '智谱 GLM Coding',
+    baseUrl: 'https://open.bigmodel.cn/api/coding/paas/v4',
+    model: 'glm-5.4'
+  },
+  {
+    label: '智谱 GLM（资源包）',
     baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
-    model: 'glm-4-plus'
+    model: 'glm-4-flash'
   },
   {
     label: '本地 Ollama',

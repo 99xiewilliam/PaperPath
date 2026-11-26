@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>PaperVault — 原文阅读</title>
+    <link rel="stylesheet" href="_shared.css" />
+  </head>
+  <body>
+    <div class="app">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="monogram">PV</div>
+          <div>
+            <h1>PaperVault</h1>
+            <small>论文智库</small>
+          </div>
+        </div>
+        <div class="nav-btn active">◆ 论文库</div>
+        <div class="nav-btn">◇ 写作思路</div>
+        <div class="nav-btn">◇ 实验对比</div>
+        <div class="nav-btn">◇ 沉淀</div>
+      </aside>
+      <div class="list-col" style="width: 0; border: none; overflow: hidden"></div>
+      <div class="main-col">
+        <div class="main-head">
+          <h2>Lost in the Middle</h2>
+          <div class="sub">原文 · AI 标重点 · 考考我</div>
+          <div class="tabs">
+            <div class="tab">结构化笔记</div>
+            <div class="tab">实验画像</div>
+            <div class="tab on">原文</div>
+            <div class="tab">AI 问答</div>
+          </div>
+        </div>
+        <div class="content">
+          <div class="pdf-pane">
+            <div class="pdf">
+              <p style="font-weight: 600; margin-bottom: 12px">Abstract</p>
+              <p>
+                <span class="hl ai"
+                  >Large language models can utilize in-context information when placed at the beginning or end of
+                  the context, but struggle when relevant information is in the middle.</span
+                >
+                We study this position bias across models and tasks…
+              </p>
+              <p style="margin-top: 16px">
+                <span class="hl"
+                  >我的看法：这条结论直接说明「把检索到的 chunk 随便拼起来」在长上下文场景会翻车，必须做重排或压缩。</span
+                >
+              </p>
+              <p style="margin-top: 16px">
+                <span class="hl ai"
+                  >Our experiments reveal a U-shaped performance curve as a function of position…</span
+                >
+              </p>
+            </div>
+            <div class="margin-notes">
+              <div class="card">
+                <h4>AI · 问题动机</h4>
+                <p>点明长上下文并非「越长越好」，中间证据会被系统性低估。</p>
+              </div>
+              <div class="card">
+                <h4>AI · 实验与结果</h4>
+                <p>U 形曲线是全文最不该跳过的实证锚点，后文消融都围绕它展开。</p>
+              </div>
+              <span class="btn-primary">AI 标重点</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="caption">界面示意 · PDF 标重点 + 我的想法</div>
+  </body>
+</html>

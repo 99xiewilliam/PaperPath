@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>PaperVault — 论文库</title>
+    <link rel="stylesheet" href="_shared.css" />
+  </head>
+  <body>
+    <div class="app">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="monogram">PV</div>
+          <div>
+            <h1>PaperVault</h1>
+            <small>论文智库</small>
+          </div>
+        </div>
+        <div class="nav-btn active">◆ 论文库</div>
+        <div class="nav-btn">◇ 写作思路</div>
+        <div class="nav-btn">◇ 实验对比</div>
+        <div class="nav-btn">◇ 沉淀</div>
+        <div class="filter-block">
+          <h3>状态</h3>
+          <span class="chip">待读</span>
+          <span class="chip on">在读</span>
+          <span class="chip">已读</span>
+          <h3 style="margin-top: 10px">分类</h3>
+          <span class="chip on">RAG</span>
+          <span class="chip">Agent</span>
+          <span class="chip">Benchmark</span>
+        </div>
+        <div class="filter-block">
+          <h3>专题</h3>
+          <span class="chip on">长上下文 RAG</span>
+          <span class="chip">多模态检索</span>
+        </div>
+      </aside>
+      <div class="list-col">
+        <div class="list-head">
+          <div class="search">⌘K 搜索标题、标签、笔记…</div>
+        </div>
+        <div class="paper-row sel">
+          <h4>Lost in the Middle: 长文档中的位置偏差</h4>
+          <div class="meta">2023 · NeurIPS · 在读</div>
+          <span class="tag">RAG</span><span class="tag">Benchmark</span>
+        </div>
+        <div class="paper-row">
+          <h4>RAPTOR: 递归摘要多层检索</h4>
+          <div class="meta">2024 · ICLR · 已读</div>
+          <span class="tag">RAG</span>
+        </div>
+        <div class="paper-row">
+          <h4>Self-RAG: 自反思检索增强</h4>
+          <div class="meta">2023 · ICLR · 已读</div>
+          <span class="tag">Agent</span>
+        </div>
+        <div class="paper-row">
+          <h4>FreshLLMs: 时效知识问答基准</h4>
+          <div class="meta">2024 · ACL · 待读</div>
+          <span class="tag">Benchmark</span>
+        </div>
+      </div>
+      <div class="main-col">
+        <div class="main-head">
+          <h2>Lost in the Middle: 长文档中的位置偏差</h2>
+          <div class="sub">Liu et al. · 已精读 · 实验画像 ✓</div>
+          <div class="tabs">
+            <div class="tab on">结构化笔记</div>
+            <div class="tab">实验画像</div>
+            <div class="tab">原文</div>
+            <div class="tab">AI 问答</div>
+          </div>
+        </div>
+        <div class="content note">
+          <h3>一句话总结</h3>
+          <p>
+            多文档 QA 里，模型更信上下文两端的信息，埋在中间的证据容易被忽略——这对长上下文 RAG
+            的切块与重排策略有直接影响。
+          </p>
+          <h3>导师精读</h3>
+          <p>
+            这篇论文的价值不在提出新架构，而在于用可复现的探针把「中间塌陷」量化了。读它时要盯住：任务设计怎么逼出位置偏好、对照组是否公平、以及作者给的缓解建议哪些真的能进你的 pipeline。
+          </p>
+          <h3>实验方法论</h3>
+          <p>
+            多模型横评（GPT / Claude / Llama 系列）、合成与真实长文档各一套、指标以准确率为主并报告位置分层曲线…
+          </p>
+          <span class="btn-primary">AI 精读 · 8/10 维度已完成</span>
+        </div>
+      </div>
+    </div>
+    <div class="caption">界面示意 · 论文库三栏</div>
+  </body>
+</html>

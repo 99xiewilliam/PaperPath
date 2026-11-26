@@ -1,0 +1,351 @@
+/* PaperVault README 示意屏 — 配色与 tailwind.config.js 一致，非实时应用截图 */
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+html,
+body {
+  width: 1440px;
+  height: 900px;
+  overflow: hidden;
+  font-family:
+    -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Helvetica Neue', sans-serif;
+  font-size: 13px;
+  line-height: 1.5;
+  color: #eeeaE2;
+  background: #171217;
+  -webkit-font-smoothing: antialiased;
+}
+.app {
+  display: flex;
+  height: 900px;
+}
+.sidebar {
+  width: 236px;
+  flex-shrink: 0;
+  background: #110c11;
+  border-right: 1px solid rgba(255, 255, 255, 0.06);
+  padding: 14px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 6px 10px;
+}
+.monogram {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  background: linear-gradient(145deg, #5a2454, #750f6d);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 600;
+  font-size: 14px;
+  color: #ddc48a;
+}
+.brand h1 {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+.brand small {
+  display: block;
+  font-size: 11px;
+  color: #8a857b;
+  font-weight: 400;
+}
+.nav-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  color: #b3aea4;
+  font-size: 13px;
+}
+.nav-btn.active {
+  background: #1f1920;
+  border-color: rgba(255, 255, 255, 0.07);
+  color: #eeeaE2;
+  font-weight: 500;
+}
+.nav-btn.active::before {
+  content: '';
+  width: 3px;
+  height: 14px;
+  border-radius: 2px;
+  background: #74ac8f;
+  margin-right: 2px;
+}
+.filter-block {
+  margin-top: 8px;
+  padding: 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: #171217;
+}
+.filter-block h3 {
+  font-size: 11px;
+  color: #8a857b;
+  margin-bottom: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.chip {
+  display: inline-block;
+  padding: 2px 8px;
+  margin: 2px 4px 2px 0;
+  border-radius: 5px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  font-size: 11px;
+  color: #b3aea4;
+}
+.chip.on {
+  border-color: rgba(116, 172, 143, 0.45);
+  color: #abd3bc;
+  background: rgba(56, 115, 90, 0.12);
+}
+.list-col {
+  width: 300px;
+  flex-shrink: 0;
+  border-right: 1px solid rgba(255, 255, 255, 0.06);
+  background: #171217;
+  display: flex;
+  flex-direction: column;
+}
+.list-head {
+  padding: 14px 14px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+.search {
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: #1f1920;
+  color: #8a857b;
+  font-size: 12px;
+}
+.paper-row {
+  padding: 12px 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+.paper-row.sel {
+  background: #282129;
+  border-left: 2px solid #74ac8f;
+}
+.paper-row h4 {
+  font-size: 13px;
+  font-weight: 500;
+  margin-bottom: 4px;
+}
+.paper-row .meta {
+  font-size: 11px;
+  color: #8a857b;
+}
+.tag {
+  display: inline-block;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(56, 115, 90, 0.18);
+  color: #abd3bc;
+  margin-right: 4px;
+}
+.main-col {
+  flex: 1;
+  min-width: 0;
+  background: #171217;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.main-head {
+  padding: 16px 20px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+.main-head h2 {
+  font-size: 17px;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+.sub {
+  font-size: 12px;
+  color: #8a857b;
+}
+.tabs {
+  display: flex;
+  gap: 4px;
+  margin-top: 12px;
+}
+.tab {
+  padding: 8px 12px;
+  font-size: 12px;
+  color: #b3aea4;
+  border-bottom: 2px solid transparent;
+}
+.tab.on {
+  color: #eeeaE2;
+  font-weight: 500;
+  border-bottom-color: #74ac8f;
+}
+.content {
+  flex: 1;
+  overflow: auto;
+  padding: 18px 22px;
+}
+.note h3 {
+  font-size: 14px;
+  margin: 16px 0 8px;
+  color: #eeeaE2;
+}
+.note h3:first-child {
+  margin-top: 0;
+}
+.note p {
+  color: #b3aea4;
+  font-size: 13px;
+  line-height: 1.65;
+}
+.card {
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 10px;
+  background: linear-gradient(180deg, #282129, #1f1920);
+  padding: 14px 16px;
+  margin-bottom: 12px;
+}
+.card h4 {
+  font-size: 12px;
+  color: #8a857b;
+  margin-bottom: 8px;
+}
+.btn-primary {
+  display: inline-flex;
+  padding: 6px 12px;
+  border-radius: 6px;
+  background: linear-gradient(180deg, #41856a, #2f644f);
+  color: #eeeaE2;
+  font-size: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+}
+.full-main {
+  flex: 1;
+  padding: 20px 28px;
+  overflow: hidden;
+}
+.section-title {
+  font-size: 20px;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+.section-desc {
+  color: #8a857b;
+  font-size: 13px;
+  margin-bottom: 18px;
+}
+.grid-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+.stat {
+  padding: 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: #1f1920;
+}
+.stat b {
+  font-size: 22px;
+  color: #abd3bc;
+}
+.pdf-pane {
+  display: flex;
+  gap: 12px;
+  height: 100%;
+}
+.pdf {
+  flex: 1.1;
+  background: #eeeae2;
+  color: #222;
+  border-radius: 8px;
+  padding: 28px 32px;
+  font-family: Georgia, 'Times New Roman', serif;
+  font-size: 13px;
+  line-height: 1.55;
+  position: relative;
+}
+.hl {
+  background: rgba(221, 163, 0, 0.35);
+  border-bottom: 2px solid #c9973f;
+}
+.hl.ai {
+  background: rgba(116, 172, 143, 0.28);
+  border-bottom-color: #74ac8f;
+}
+.margin-notes {
+  width: 240px;
+  font-size: 11px;
+  color: #b3aea4;
+}
+.chat {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-width: 720px;
+}
+.bubble {
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  background: #1f1920;
+  font-size: 13px;
+  line-height: 1.6;
+  color: #b3aea4;
+}
+.bubble.user {
+  align-self: flex-end;
+  max-width: 85%;
+  background: #282129;
+  color: #eeeaE2;
+}
+.bubble.tools {
+  font-size: 11px;
+  color: #8a857b;
+  border-style: dashed;
+}
+.table-wrap {
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 10px;
+  overflow: hidden;
+}
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+th,
+td {
+  padding: 8px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  text-align: left;
+}
+th {
+  background: #1f1920;
+  color: #8a857b;
+  font-weight: 500;
+}
+.caption {
+  position: absolute;
+  bottom: 8px;
+  right: 12px;
+  font-size: 10px;
+  color: #8a857b;
+  opacity: 0.85;
+}

@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>PaperVault — AI 问答</title>
+    <link rel="stylesheet" href="_shared.css" />
+  </head>
+  <body>
+    <div class="app">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="monogram">PV</div>
+          <div>
+            <h1>PaperVault</h1>
+            <small>专题 · 长上下文 RAG</small>
+          </div>
+        </div>
+        <div class="nav-btn active">◆ 论文库</div>
+        <div class="nav-btn">◇ 写作思路</div>
+        <div class="nav-btn">◇ 实验对比</div>
+        <div class="nav-btn">◇ 沉淀</div>
+      </aside>
+      <div class="list-col" style="width: 240px">
+        <div class="list-head"><strong style="font-size: 12px; color: #eeeaE2">专题 · 6 篇</strong></div>
+        <p style="padding: 10px 14px; font-size: 11px; color: #8a857b; line-height: 1.6">
+          Lost in the Middle<br />RAPTOR<br />Self-RAG …
+        </p>
+      </div>
+      <div class="main-col">
+        <div class="main-head">
+          <h2>AI 问答</h2>
+          <div class="sub">多轮对话 · 流式输出 · 笔记不够时自动查库</div>
+        </div>
+        <div class="content">
+          <div class="chat">
+            <div class="bubble user">
+              这几篇里，谁对「中间塌陷」给出了最可操作的缓解建议？如果我做长上下文 RAG 该怎么排 chunk？
+            </div>
+            <div class="bubble">
+              Lost in the Middle 量化了 U 形曲线；RAPTOR 用层次摘要把中间信息抬到树的上层；Self-RAG
+              则在生成前用反思 token 决定要不要检索。<br /><br />
+              工程上优先试：按相关度 + 位置混合重排；对中段 chunk 做二次摘要——这与你在笔记里写的「不能简单拼接」一致。
+            </div>
+            <div class="bubble tools">已查阅：笔记×6 · PDF 片段×2 · search_library</div>
+            <div class="search" style="margin-top: 8px; color: #8a857b">向这批论文提问…</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="caption">界面示意 · 专题多轮问答</div>
+  </body>
+</html>
